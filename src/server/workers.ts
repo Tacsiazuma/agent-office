@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { CodexUsageReader } from './codex-usage.js';
 import headless from '@xterm/headless';
 import serialize from '@xterm/addon-serialize';
-import type { AgentChoice, AgentEffort, AgentProvider, Run, TerminalHit, WorkerInfo, WorkerKind, WorkerRepo, WorkerStatus, WorkerTask } from '../shared/protocol.js';
+import type { AgentChoice, AgentEffort, AskQuestion, AgentProvider, Run, TerminalHit, WorkerInfo, WorkerKind, WorkerRepo, WorkerStatus, WorkerTask } from '../shared/protocol.js';
 import { FAILS_TO_DESPAIR, outputFailed, toolAction } from '../shared/actions.js';
 import { FLAG_BOLD, FLAG_DIM, FLAG_INVERSE, RGB_FLAG, isAgentEffort, isClaudeModel } from '../shared/protocol.js';
 import { WORKSPACE_FILES, WORKTREES_DIR, Worktrees, describeWork, workspaceOf, type WorktreeCleanup, type WorktreeRef, type WorktreeState } from './worktrees.js';
@@ -140,6 +140,8 @@ export interface RunAs {
 
 interface Worker {
   info: WorkerInfo;
+  /** The AskUserQuestion it waits on: its hook call stays open until `finish` hands the hook its answer (null: ask in the terminal after all). */
+  ask?: { id: string; finish(output: object | null): void };
   /** The account that hired it, whose sign-ins it runs on. None: the office's own. */
   owner?: string;
   pty?: Pty;
@@ -238,6 +240,8 @@ export class WorkerManager {
   private saveTimer: NodeJS.Timeout;
   /** How many rows the floor's back office is built out: its desks past that aren't there to hire at (see WING). */
   wing: () => number = () => 0;
+  /** Whether anyone is in the office to answer a worker's question there: if not, it asks in its terminal. */
+  askable: () => boolean = () => false;
 
   constructor(
     private dir: string,
@@ -597,6 +601,7 @@ export class WorkerManager {
   async kill(id: string, cleanup?: WorktreeCleanup, landed?: string, landedRepos?: Record<string, string | undefined>): Promise<{ note?: string; error?: string }> {
     const w = this.workers.get(id);
     if (!w) return {};
+    this.dropAsk(w);
     this.workers.delete(id);
     this.namer.forget(id);
     clearTimeout(w.scanTimer);
@@ -1117,6 +1122,55 @@ export class WorkerManager {
     w.screenDirty = true;
     w.lastLines = [];
     this.emitUpdate(w);
+  }
+
+
+  /**
+   * The hook for a worker's AskUserQuestion: holds the call open while the question waits in the
+   * office (WorkerInfo.question) and resolves with what the hook should print, which turns the call
+   * down with the answer as the reason. Null leaves it to Claude's own prompt in the terminal, which
+   * is what happens with nobody in the office, and when the hook is cut off (Esc in the terminal).
+   */
+  handleAsk(workerId: string, token: string, payload: any, cut: (fn: () => void) => void): Promise<object | null> | undefined {
+    const w = this.workers.get(workerId);
+    if (!w || !w.pty || w.info.kind !== 'agent' || (w.info.provider !== 'claude' && w.info.provider !== 'custom') || !safeEq(token, w.hookToken)) return undefined;
+    const questions = askQuestions(payload?.tool_input);
+    if (!questions.length || !this.askable()) return Promise.resolve(null);
+    this.dropAsk(w);
+    return new Promise((resolve) => {
+      const id = randomUUID();
+      const finish = (output: object | null) => {
+        if (w.ask?.id !== id) return;
+        w.ask = undefined;
+        w.info.question = undefined;
+        resolve(output);
+        if (output && w.info.status === 'needs_input') this.setStatus(w, 'working');
+        else this.emitUpdate(w);
+      };
+      w.ask = { id, finish };
+      cut(() => finish(null));
+      w.info.question = { id, questions };
+      if (w.info.status !== 'needs_input') this.setStatus(w, 'needs_input');
+      else this.emitUpdate(w);
+    });
+  }
+
+  /** What someone answered in the office (`answers[i]` for question i), or threw the question away (`dismiss`). */
+  answer(workerId: string, questionId: string, answers: string[][] | undefined, dismiss: boolean | undefined): string | undefined {
+    const w = this.workers.get(workerId);
+    const q = w?.info.question;
+    if (!w?.ask || !q || q.id !== questionId) return 'That question is no longer waiting';
+    const reason = dismiss
+      ? 'The user dismissed this question in the Agent Office window without answering it. Do not ask it again: go on with the most reasonable assumption and say which one you made.'
+      : `The user already answered in the Agent Office window (nothing was shown in the terminal). Their answers:\n${q.questions
+          .map((x, i) => `- ${x.question} → ${(answers?.[i] ?? []).map((a) => String(a).slice(0, 2000)).join(', ') || '(no answer)'}`)
+          .join('\n')}\nGo on with these answers; do not ask again.`;
+    w.ask.finish({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } });
+    return undefined;
+  }
+
+  private dropAsk(w: Worker) {
+    w.ask?.finish(null);
   }
 
   /** Claude Code hook callback. */
@@ -1884,6 +1938,7 @@ export class WorkerManager {
     proc.onExit(({ exitCode, error, lost }) => {
       if (w.pty !== proc || this.workers.get(info.id) !== w) return;
       w.pty = undefined;
+      this.dropAsk(w);
       if (error) {
         this.startFailed(w, error);
         return;
@@ -2126,6 +2181,22 @@ process.stdin.on('end', () => {
 `,
       { mode: 0o600 },
     );
+    const askHook = path.join(this.dataDir, 'ask-hook.cjs');
+    writeFileSync(
+      askHook,
+      `const http = require('http');
+let body = '';
+process.stdin.on('data', (c) => (body += c));
+process.stdin.on('end', () => {
+  const url = new URL(process.env.AGENT_OFFICE_HOOK_URL + '/hooks/claude/ask');
+  url.searchParams.set('worker', process.env.AGENT_OFFICE_WORKER_ID);
+  const req = http.request(url, { method: 'POST', headers: { authorization: 'Bearer ' + process.env.AGENT_OFFICE_HOOK_TOKEN, 'content-type': 'application/json' } }, (res) => res.pipe(process.stdout));
+  req.on('error', () => {});
+  req.end(body);
+});
+`,
+      { mode: 0o600 },
+    );
     const hooks: Record<string, unknown[]> = {};
     for (const [event, matcher] of events) {
       const curl =
@@ -2137,6 +2208,13 @@ process.stdin.on('end', () => {
         `else ${shq(process.execPath)} ${shq(nodeHook)} ${event} >/dev/null 2>&1; fi; true`;
       hooks[event] = [{ ...(matcher ? { matcher } : {}), hooks: [{ type: 'command', command }] }];
     }
+    // Its questions are asked in the office: this call stays open until they're answered, and what it prints is the answer.
+    const ask =
+      `if [ -z "$AGENT_OFFICE_WORKER_ID" ] || [ -z "$AGENT_OFFICE_HOOK_URL" ]; then exit 0; fi; ` +
+      `if command -v curl >/dev/null 2>&1; then curl -sS -X POST -H "Authorization: Bearer $AGENT_OFFICE_HOOK_TOKEN" -H "Content-Type: application/json" ` +
+      `--data-binary @- "$AGENT_OFFICE_HOOK_URL/hooks/claude/ask?worker=$AGENT_OFFICE_WORKER_ID" 2>/dev/null; ` +
+      `else ${shq(process.execPath)} ${shq(askHook)} 2>/dev/null; fi; true`;
+    hooks.PreToolUse.push({ matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: ask, timeout: ASK_HOOK_TIMEOUT }] });
     // Looking at the office's workers doesn't need anyone's say-so; hiring and sending home still asks.
     const permissions = { allow: MCP_READ_ONLY };
     writeFileSync(this.settingsPath, JSON.stringify({ hooks, permissions }, null, 2), { mode: 0o600 });
@@ -2591,6 +2669,28 @@ function draftPr(info: WorkerInfo, commits: string[], by: string, other?: { home
   else if (closes && other?.home) parts.push(`Part of ${other.home}#${closes}`);
   parts.push(`_Opened from Agent Office by ${by} · ${info.name} at ${DESK_BY_ID.get(info.deskId)?.label ?? info.deskId}_`);
   return { title, body: parts.join('\n\n') };
+}
+
+/** How long the hook may wait for an answer in the office: a day, since nobody may be at their desk for hours. */
+const ASK_HOOK_TIMEOUT = 86400;
+
+/** The questions of an AskUserQuestion call, cut down to what the office shows. */
+function askQuestions(input: any): AskQuestion[] {
+  if (!Array.isArray(input?.questions)) return [];
+  const text = (v: unknown, n: number) => (typeof v === 'string' ? v.slice(0, n) : '');
+  return input.questions
+    .slice(0, 4)
+    .map((q: any): AskQuestion => ({
+      question: text(q?.question, 2000),
+      header: text(q?.header, 40),
+      multiSelect: q?.multiSelect === true,
+      options: (Array.isArray(q?.options) ? q.options : []).slice(0, 8).map((o: any) => ({
+        label: text(o?.label, 200),
+        description: text(o?.description, 1000),
+        ...(typeof o?.preview === 'string' && o.preview ? { preview: o.preview.slice(0, 8000) } : {}),
+      })),
+    }))
+    .filter((q: AskQuestion) => q.question);
 }
 
 function truncate(s: string, n: number) {

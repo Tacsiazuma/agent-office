@@ -1300,3 +1300,15 @@ a.when:hover { text-decoration: underline; }
   .loading-paw, .loading-shadow { animation: none; }
   #loading, .loading-fill { transition: none; }
 }
+/* A worker's question, asked in the office (ui/question.ts). */
+.ask-question { display: flex; flex-direction: column; gap: 16px; }
+.ask-q { display: flex; flex-direction: column; gap: 8px; }
+.ask-head p { margin: 4px 0 0; font-weight: 800; }
+.ask-tag { display: inline-block; padding: 1px 10px; border: 2px solid var(--ink); border-radius: 999px; background: var(--paper-2); font-size: 12px; font-weight: 900; }
+.ask-options { display: flex; flex-direction: column; gap: 6px; }
+.modal label.ask-option { display: flex; gap: 10px; align-items: flex-start; margin: 0; padding: 8px 12px; border: 3px solid var(--ink); border-radius: 12px; background: #fff; cursor: pointer; }
+.modal label.ask-option:has(input:checked) { border-color: var(--accent); background: var(--paper-2); }
+.ask-option input { margin: 3px 0 0; accent-color: var(--accent); }
+.ask-option small { display: block; color: var(--muted); font-weight: 700; }
+.ask-preview { margin: 0; padding: 10px 12px; border: 2px dashed var(--ink); border-radius: 12px; background: #fff; font-size: 12px; white-space: pre-wrap; max-height: 200px; overflow: auto; }
+.ask-confirm { display: flex; gap: 8px; justify-content: flex-end; }

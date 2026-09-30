@@ -75,9 +75,10 @@ export function setDoing(modal: Modal, doing: string | undefined) {
  * Opens a modal. Esc closes it unless `escCloses` is false (for dialogs you mustn't skip), and so
  * does a ✕ in its top right corner unless `closeButton` is false (it follows `escCloses`). `doing`
  * is what teammates see under your name tag while it's open, like "reading PR #12", and `reading`
- * puts an open book in your character's hands. `onClose` hears whether it was the Esc key.
+ * puts an open book in your character's hands. `onClose` hears whether it was the Esc key. `canClose`
+ * is asked before every close (✕, Esc, a click outside) and can say no, for a window that first wants to confirm.
  */
-export function openModal(content: HTMLElement, opts: { escCloses?: boolean; onClose?: (byEsc: boolean) => void; backdropCloses?: boolean; closeButton?: boolean; doing?: string; reading?: boolean } = {}): Modal {
+export function openModal(content: HTMLElement, opts: { escCloses?: boolean; onClose?: (byEsc: boolean) => void; backdropCloses?: boolean; closeButton?: boolean; doing?: string; reading?: boolean; canClose?: () => boolean } = {}): Modal {
   const backdrop = h('div.backdrop', {}, content);
   const root = document.getElementById('modal-root')!;
   root.append(backdrop);
@@ -100,6 +101,10 @@ export function openModal(content: HTMLElement, opts: { escCloses?: boolean; onC
     reading: opts.reading,
     close() {
       if (closed) return;
+      if (opts.canClose && !opts.canClose()) {
+        byEsc = false;
+        return;
+      }
       closed = true;
       backdrop.remove();
       window.removeEventListener('keydown', onKey, true);

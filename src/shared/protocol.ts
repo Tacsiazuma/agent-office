@@ -80,6 +80,20 @@ export interface WorkerTask {
   summary: string;
 }
 
+/** One question of an AskUserQuestion call, as the worker asked it. */
+export interface AskQuestion {
+  question: string;
+  header: string;
+  multiSelect: boolean;
+  options: { label: string; description: string; preview?: string }[];
+}
+
+/** A question a worker is waiting on, asked in the office instead of its terminal (see WorkerInfo.question). */
+export interface WorkerQuestion {
+  id: string;
+  questions: AskQuestion[];
+}
+
 export interface WorkerInfo {
   id: string;
   /** 'agent' runs the selected provider; 'shell' is a plain shared login shell. */
@@ -93,6 +107,8 @@ export interface WorkerInfo {
   name: string;
   color: string;
   status: WorkerStatus;
+  /** Set while it waits on an AskUserQuestion answer from the office UI: whoever opens its desk answers it (see 'worker.answer'). */
+  question?: WorkerQuestion;
   /** True once someone opened the terminal after the last done / needs_input. */
   acked: boolean;
   /** When it last went to done or needs_input (ms), so N goes to whoever has waited longest first. */
@@ -1110,6 +1126,8 @@ export type ClientMsg =
   | { t: 'worker.worktree'; workerId: string }
   /** Puts a lost worker's worktree back and starts it again (see WorkerInfo.lost); `all`: every lost worker on the floor. */
   | { t: 'worker.rebuild'; workerId: string; all?: boolean }
+  /** Answers a worker's question: `answers[i]` is what was picked or typed for question i; `dismiss` throws the question away instead. */
+  | { t: 'worker.answer'; workerId: string; questionId: string; answers?: string[][]; dismiss?: boolean }
   | { t: 'worker.attach'; workerId: string }
   | { t: 'worker.detach'; workerId: string }
   /** With `issue`, the prompt hands the worker that GitHub issue, which is taken as for worker.spawn. */

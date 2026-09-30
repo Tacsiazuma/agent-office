@@ -1520,3 +1520,68 @@ test("a worker whose worktree was deleted outside the office waits, marked lost,
   assert.equal(after.get(gone.id)?.lost, undefined);
   assert.deepEqual(toasts, []);
 });
+
+test("a Claude worker's AskUserQuestion waits in the office for an answer, or falls back to the terminal", async (t) => {
+  const f = fixture();
+  const updates: WorkerInfo[] = [];
+  isolateProviderEnvironment(f, t);
+  const previousLog = process.env.FAKE_AGENT_LOG;
+  process.env.FAKE_AGENT_LOG = f.log;
+  t.after(() => {
+    if (previousLog === undefined) delete process.env.FAKE_AGENT_LOG;
+    else process.env.FAKE_AGENT_LOG = previousLog;
+    f.close();
+  });
+  const workers = manager(f, f.claude, updates);
+  t.after(() => workers.shutdown());
+  const worker = workers.spawn('desk-1', 'test', 'ask me things');
+  assert.equal(typeof worker, 'object');
+  if (typeof worker === 'string') return;
+  const records = await waitFor(() => f.read(), (r) => r.some((x) => x.kind === 'claude' && x.args.includes('--settings')));
+  const token = records.find((x) => x.kind === 'claude' && x.args.includes('--settings'))!.env.hookToken!;
+  const input = {
+    questions: [
+      { question: 'Which database?', header: 'DB', multiSelect: false, options: [{ label: 'Postgres', description: 'relational' }, { label: 'SQLite', description: 'a file', preview: 'file.db' }] },
+      { question: 'Which extras?', header: 'Extras', multiSelect: true, options: [{ label: 'Auth', description: '' }, { label: 'Cache', description: '' }] },
+    ],
+  };
+  const settings = JSON.parse(readFileSync(path.join(f.data, 'claude-hooks.json'), 'utf8'));
+  const askHook = settings.hooks.PreToolUse.find((h: { matcher?: string }) => h.matcher === 'AskUserQuestion');
+  assert.ok(askHook, 'the settings hook AskUserQuestion into the office');
+  assert.ok(askHook.hooks[0].timeout > 3600, 'the hook may wait hours for an answer');
+  assert.match(askHook.hooks[0].command, /hooks\/claude\/ask/);
+
+  // Nobody in the office to answer: the question stays in the terminal.
+  assert.equal(workers.handleAsk(worker.id, 'wrong', { tool_input: input }, () => {}), undefined);
+  assert.equal(await workers.handleAsk(worker.id, token, { tool_input: input }, () => {}), null);
+  assert.equal(workers.get(worker.id)?.question, undefined);
+
+  workers.askable = () => true;
+  const answered = workers.handleAsk(worker.id, token, { tool_input: input }, () => {})!;
+  const asked = workers.get(worker.id)!;
+  assert.equal(asked.status, 'needs_input');
+  assert.equal(asked.question?.questions.length, 2);
+  assert.equal(asked.question?.questions[0].options[1].preview, 'file.db');
+  assert.equal(asked.question?.questions[1].multiSelect, true);
+  assert.match(String(workers.answer(worker.id, 'stale', [[]], false)), /no longer waiting/);
+  assert.equal(workers.answer(worker.id, asked.question!.id, [['SQLite'], ['Auth', 'my own']], false), undefined);
+  const out = (await answered) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } };
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, /Which database\? → SQLite/);
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, /Which extras\? → Auth, my own/);
+  assert.equal(workers.get(worker.id)?.question, undefined);
+  assert.equal(workers.get(worker.id)?.status, 'working');
+
+  // Thrown away: the worker is told to go on with its own guess.
+  const dismissed = workers.handleAsk(worker.id, token, { tool_input: input }, () => {})!;
+  assert.equal(workers.answer(worker.id, workers.get(worker.id)!.question!.id, undefined, true), undefined);
+  assert.match(JSON.stringify(await dismissed), /dismissed this question/);
+
+  // Cut off (Esc in the terminal): the question goes away and the hook prints nothing.
+  let cut = () => {};
+  const interrupted = workers.handleAsk(worker.id, token, { tool_input: input }, (fn) => (cut = fn))!;
+  assert.ok(workers.get(worker.id)?.question);
+  cut();
+  assert.equal(await interrupted, null);
+  assert.equal(workers.get(worker.id)?.question, undefined);
+});
