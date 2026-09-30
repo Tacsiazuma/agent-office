@@ -13,6 +13,8 @@ test('detects the configured provider from Unix and Windows command paths', () =
   assert.equal(configuredProvider('GROK.EXE'), 'grok');
   assert.equal(configuredProvider('/home/me/.local/bin/muse'), 'muse');
   assert.equal(configuredProvider('MUSE.EXE'), 'muse');
+  assert.equal(configuredProvider('C:\\Users\\me\\AppData\\Roaming\\npm\\copilot.exe'), 'copilot');
+  assert.equal(configuredProvider('/usr/local/bin/copilot'), 'copilot');
   // DeepSeek Harness: its own provider now that the office can drive it over ACP.
   assert.equal(configuredProvider('dsh'), 'dsh');
   assert.equal(configuredProvider('/opt/tools/dsh'), 'dsh');
@@ -51,7 +53,7 @@ test('model validation follows the provider', () => {
   assert.equal(validateWorkerModel('agent', 'opencode', 'vendor/model'), undefined);
   assert.match(validateWorkerModel('agent', 'opencode', 'gpt-5') ?? '', /OpenCode/);
   // Custom still takes none.
-  assert.match(validateWorkerModel('agent', 'custom', 'anything') ?? '', /Claude Code, OpenCode, Grok, Muse or DeepSeek Harness/);
+  assert.match(validateWorkerModel('agent', 'custom', 'anything') ?? '', /Claude Code, OpenCode, Grok, Muse, Copilot or DeepSeek Harness/);
 });
 
 test('reasoning effort joins Claude for DeepSeek Harness', () => {
@@ -60,6 +62,6 @@ test('reasoning effort joins Claude for DeepSeek Harness', () => {
   assert.match(validateWorkerEffort('agent', 'dsh', 'enormous') ?? '', /Invalid effort/);
   assert.match(validateWorkerEffort('shell', 'dsh', 'high') ?? '', /Shell workers/);
   assert.equal(validateWorkerEffort('agent', 'claude', 'xhigh'), undefined);
-  assert.match(validateWorkerEffort('agent', 'opencode', 'high') ?? '', /Claude Code, Grok, Muse or DeepSeek Harness/);
-  assert.match(validateWorkerEffort('agent', 'codex', 'high') ?? '', /Claude Code, Grok, Muse or DeepSeek Harness/);
+  assert.match(validateWorkerEffort('agent', 'opencode', 'high') ?? '', /Claude Code, Grok, Muse, Copilot or DeepSeek Harness/);
+  assert.match(validateWorkerEffort('agent', 'codex', 'high') ?? '', /Claude Code, Grok, Muse, Copilot or DeepSeek Harness/);
 });

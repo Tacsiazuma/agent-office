@@ -38,6 +38,7 @@ type Fixture = {
   codex: string;
   grok: string;
   muse: string;
+  copilot: string;
   custom: string;
   read(): Invocation[];
   close(): void;
@@ -140,6 +141,7 @@ function fixture(): Fixture {
   const codex = path.join(bin, 'codex');
   const grok = path.join(bin, 'grok');
   const muse = path.join(bin, 'muse');
+  const copilot = path.join(bin, 'copilot');
   mkdirSync(data, { recursive: true });
   mkdirSync(bin, { recursive: true });
   writeFileSync(claude, fakeAgent, { mode: 0o700 });
@@ -148,11 +150,13 @@ function fixture(): Fixture {
   writeFileSync(codex, fakeAgent, { mode: 0o700 });
   writeFileSync(grok, fakeAgent, { mode: 0o700 });
   writeFileSync(muse, fakeAgent, { mode: 0o700 });
+  writeFileSync(copilot, fakeAgent, { mode: 0o700 });
   chmodSync(claude, 0o700);
   chmodSync(opencode, 0o700);
   chmodSync(custom, 0o700);
   chmodSync(grok, 0o700);
   chmodSync(muse, 0o700);
+  chmodSync(copilot, 0o700);
   writeFileSync(log, '');
   return {
     root,
@@ -163,6 +167,7 @@ function fixture(): Fixture {
     codex,
     grok,
     muse,
+    copilot,
     custom,
     read() {
       if (!existsSync(log)) return [];
@@ -738,6 +743,67 @@ test('Grok workers isolate GROK_HOME, follow authenticated hooks, and resume the
   assert.equal(restored.get(worker.id)?.status, 'idle');
 });
 
+
+test('Copilot workers load the office plugin and MCP config, follow authenticated hooks, and resume their session', async (t) => {
+  const f = fixture();
+  isolateProviderEnvironment(f, t);
+  const oldLog = process.env.FAKE_AGENT_LOG;
+  process.env.FAKE_AGENT_LOG = f.log;
+  t.after(() => { if (oldLog === undefined) delete process.env.FAKE_AGENT_LOG; else process.env.FAKE_AGENT_LOG = oldLog; f.close(); });
+  const workers = new WorkerManager(f.root, f.data, f.claude, ['--claude-only'], { url: 'http://127.0.0.1:1', token: '' }, events([]), ledger(f.data));
+  t.after(() => workers.shutdown());
+  const worker = workers.spawn('desk-1', 'test', '- fix the login', false, 'agent', 'copilot', 'claude-sonnet-4.5', 'high');
+  assert.notEqual(typeof worker, 'string'); if (typeof worker === 'string') return;
+  const calls = await waitFor(f.read, x => x.some(r => r.kind === 'copilot'));
+  const first = calls.find(r => r.kind === 'copilot')!;
+  const token = first.env.hookToken!;
+  assert.equal(worker.status, 'starting');
+  assert.equal(worker.model, 'claude-sonnet-4.5');
+  assert.equal(worker.effort, 'high');
+  const sessionId = worker.sessionId!;
+  assert.match(sessionId, /^[0-9a-f-]{36}$/i);
+  const at = (flag: string) => first.args[first.args.indexOf(flag) + 1];
+  assert.equal(at('--plugin-dir'), path.join(f.data, 'copilot-plugin'));
+  assert.equal(at('--additional-mcp-config'), `@${path.join(f.data, 'agent-office-copilot-mcp.json')}`);
+  assert.equal(at('--session-id'), sessionId);
+  assert.equal(at('--model'), 'claude-sonnet-4.5');
+  assert.equal(at('--reasoning-effort'), 'high');
+  assert.equal(first.args.at(-1), '--interactive=- fix the login');
+  assert.equal(first.args.includes('--claude-only'), false);
+  assert.equal(calls.some(r => r.kind === 'claude'), false);
+  const hook = (event: string, extra = {}) => workers.handleCopilotHook(worker.id, token, event, { sessionId, ...extra });
+  assert.equal(workers.handleCopilotHook(worker.id, 'wrong', 'sessionStart', { sessionId }), false);
+  assert.equal(hook('sessionStart', { source: 'new' }), true);
+  assert.equal(worker.status, 'idle');
+  assert.equal(hook('userPromptSubmitted', { prompt: 'Implement the actual task' }), true);
+  assert.equal(worker.status, 'working');
+  assert.equal(hook('preToolUse', { toolName: 'bash' }), true);
+  assert.equal(worker.status, 'working');
+  assert.equal(hook('permissionRequest', { toolName: 'bash' }), true);
+  assert.equal(worker.status, 'needs_input');
+  assert.equal(hook('postToolUse', { toolName: 'bash' }), true);
+  assert.equal(worker.status, 'working');
+  assert.equal(hook('agentStop', { agent_id: 'child' }), false);
+  assert.equal(worker.status, 'working');
+  assert.equal(hook('agentStop', { stopReason: 'end_turn' }), true);
+  assert.equal(worker.status, 'done');
+  assert.equal(workers.handleCopilotHook(worker.id, token, 'agentStop', { sessionId: 'someone-else' }), false);
+  assert.equal(workers.handleGrokHook(worker.id, token, 'Stop', { sessionId }), false);
+  workers.shutdown();
+  const restored = manager(f, f.claude, [], []);
+  t.after(() => restored.shutdown());
+  await restored.start();
+  const nextCalls = await waitFor(f.read, x => x.filter(r => r.kind === 'copilot' && !r.stdin).length >= 2);
+  const next = nextCalls.filter(r => r.kind === 'copilot' && !r.stdin).at(-1)!;
+  assert.ok(next.args.includes(`--resume=${sessionId}`));
+  assert.equal(next.args.includes('--session-id'), false);
+  assert.notEqual(next.env.hookToken, token);
+  assert.equal(restored.get(worker.id)?.provider, 'copilot');
+  assert.equal(restored.get(worker.id)?.model, 'claude-sonnet-4.5');
+  assert.equal(restored.handleCopilotHook(worker.id, token, 'agentStop', { sessionId }), false);
+  assert.equal(restored.handleCopilotHook(worker.id, next.env.hookToken!, 'sessionStart', { sessionId, source: 'resume' }), true);
+  assert.equal(restored.get(worker.id)?.status, 'idle');
+});
 
 test('Muse workers isolate XDG, follow authenticated hooks, resume by uuid, and paste a follow-up prompt', async (t) => {
   const f = fixture();

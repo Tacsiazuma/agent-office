@@ -11,7 +11,7 @@
 
 **A 3D office your team shares with its coding agents.**
 
-Sit **Claude Code**, **Codex**, **OpenCode**, **Grok**, **Muse** and **DeepSeek Harness** workers at desks, watch each one's terminal on the laptop in front of it,
+Sit **Claude Code**, **Codex**, **OpenCode**, **Grok**, **Muse**, **GitHub Copilot** and **DeepSeek Harness** workers at desks, watch each one's terminal on the laptop in front of it,
 and jump into any of them together. Every GitHub repo is a floor of the building.
 
 [![Release](https://img.shields.io/github/v/release/AgentSystemLabs/agent-office?style=flat-square&color=e8c547&label=release)](https://github.com/AgentSystemLabs/agent-office/releases)
@@ -33,11 +33,11 @@ curl -fsSL https://raw.githubusercontent.com/AgentSystemLabs/agent-office/main/i
 ## What it is
 
 - **A floor per project.** Ride the elevator, pick one of your GitHub repos, and the office clones it and opens a floor for it. Every worker, board and queue on that floor works in that checkout.
-- **Workers at desks.** Walk up to an empty desk, press **E**, and pick Claude Code, Codex, OpenCode, Grok, Muse or DeepSeek Harness. The agent's live terminal shows on its laptop, and anyone can open it and type.
+- **Workers at desks.** Walk up to an empty desk, press **E**, and pick Claude Code, Codex, OpenCode, Grok, Muse, GitHub Copilot or DeepSeek Harness. The agent's live terminal shows on its laptop, and anyone can open it and type.
 - **You can see who needs you.** A worker that needs input or has finished jumps up and down and dings. Press **N** to go straight to the one that has waited longest. When a Claude worker asks you something (`AskUserQuestion`), a ❓ shows over its head and **E** at its desk opens the question in the office, with its options, multi-select, your own answer and previews, so you never type into its terminal.
 - **From your phone, too.** `/lite` is the office in 2D: every worker and what it's waiting on, its terminal with the keys a phone keyboard lacks, and the boards. The 3D office offers it on a phone or a slow computer.
 - **GitHub on the walls.** Issues and pull requests hang on cork boards. Hand an issue to a worker, queue tasks, give a worker its own git worktree and open its PR with one key (if one gets deleted behind the office's back, the worker waits at its desk until you rebuild it). One task can span several projects: the worker gets a worktree of each, and a PR in each that links the others.
-- **Agents that manage agents.** Every worker can list, hire, message and send home the others, through an `agent-office` MCP server (Claude Code, Codex, OpenCode) or the `office-workers` command. Ask one to "send everyone whose PR merged home" and it does, deleting their worktrees and branches unless they hold unpushed work.
+- **Agents that manage agents.** Every worker can list, hire, message and send home the others, through an `agent-office` MCP server (Claude Code, Codex, OpenCode, GitHub Copilot) or the `office-workers` command. Ask one to "send everyone whose PR merged home" and it does, deleting their worktrees and branches unless they hold unpushed work.
 - **Together.** Voice, chat, screen sharing on the lounge TV and a shared whiteboard.
 
 - **Other maps.** Turn the whole building into a castle: sit on a throne of iron blades while your workers line up before you when they're done, send new ones off through the Hand of the King, and watch their beards grow long and grey as they toil. Or make a map of your own in JSON ([docs/maps.md](docs/maps.md)).
@@ -49,7 +49,7 @@ There's a lot more (a rooftop bar, an office dog, an arcade, supercars in the ga
 On the machine that runs the office:
 
 - **Node.js 20+**
-- At least one agent CLI, signed in as the user that runs the office: **Claude Code** (`claude`), **Codex** (`codex`), **OpenCode** (`opencode`), **Grok** (`grok`), **Muse** (`muse`) or **DeepSeek Harness** (`dsh`). With [accounts](#add-users), everyone can sign in to their own Claude from the office instead.
+- At least one agent CLI, signed in as the user that runs the office: **Claude Code** (`claude`), **Codex** (`codex`), **OpenCode** (`opencode`), **Grok** (`grok`), **Muse** (`muse`), **GitHub Copilot** (`copilot`) or **DeepSeek Harness** (`dsh`). With [accounts](#add-users), everyone can sign in to their own Claude from the office instead.
 - **git**, and the **GitHub CLI** (`gh auth login`) for cloning repos and the issue and PR boards
 
 ## Run locally
@@ -84,7 +84,7 @@ Common options:
 agent-office ~/code/my-project              # use a project you already have as the first floor
 agent-office --password 'correct horse'     # choose the password
 agent-office --port 4700
-agent-office --agent grok                   # default agent: claude, codex, opencode, grok, muse or dsh
+agent-office --agent grok                   # default agent: claude, codex, opencode, grok, muse, copilot or dsh
 agent-office --no-open                      # print the sign-in link instead of opening a browser
 agent-office setup                          # the first-start walkthrough again (office stopped)
 ```
