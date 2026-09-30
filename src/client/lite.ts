@@ -13,6 +13,7 @@ import { isAsleep } from '../shared/status';
 import type { AgentEffort, AgentProvider, FloorInfo, WorkerInfo } from '../shared/protocol';
 import { $, clip, closeAllModals, doingNow, h, onDoingChange, onModalChange, openModal, readingNow, STATUS_LABEL, timeAgo, toast } from './ui/dom';
 import { openTerminal, openTerminalFor, routeTerminalMessage } from './ui/terminal';
+import { openQuestion, questionUpdate } from './ui/question';
 import { openChanges, openChangesFor, routeChangesMessage } from './ui/changes';
 import { lostWorktreeDialog, openPrompt, routeWorktreeMessage, sendHomeDialog } from './ui/prompt';
 import { openBoard, type BoardActions } from './ui/boards';
@@ -150,7 +151,7 @@ function workerCard(w: WorkerInfo): HTMLElement {
   const now = w.lost
     ? '🌿 Its worktree was deleted outside agent-office: open it to fix it'
     : w.status === 'needs_input'
-      ? `🙋 ${w.activity ?? 'Waiting on an answer'}`
+      ? `${w.question ? '❓' : '🙋'} ${w.activity ?? 'Waiting on an answer'}`
       : asleep
         ? '💤 Asleep: open it to wake it up'
         : w.status === 'done'
@@ -198,6 +199,7 @@ function noticeWorkers() {
 }
 
 store.on('workers', () => {
+  for (const w of store.workers.values()) questionUpdate(w);
   noticeWorkers();
   renderWorkers();
 });
@@ -210,6 +212,7 @@ function openWorker(id: string) {
   const w = store.workers.get(id);
   if (!w) return;
   if (w.lost) return fixLostWorktree(w);
+  if (w.question) return openQuestion(net, { ...w, question: w.question });
   if (isAsleep(w.status)) {
     if (!w.sessionId && w.kind !== 'shell') toast(`${w.name} has no saved session — starting a fresh one`, 'warn');
     net.send({ t: 'worker.resume', workerId: id });

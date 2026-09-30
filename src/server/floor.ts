@@ -196,6 +196,7 @@ export class Floor {
       ctx.dshProfile,
     );
     this.workers.wing = () => this.plan.wing;
+    this.workers.askable = () => ctx.people(this) > 0;
 
     this.github = new GitHub(
       def.dir,
