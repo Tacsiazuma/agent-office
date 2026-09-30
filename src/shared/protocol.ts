@@ -32,10 +32,10 @@ export type WorkerKind = 'agent' | 'shell';
  */
 export type WorkerAction = 'read' | 'edit' | 'test' | 'web' | 'failing';
 
-export type AgentProvider = 'claude' | 'opencode' | 'codex' | 'grok' | 'muse' | 'dsh' | 'custom';
+export type AgentProvider = 'claude' | 'opencode' | 'codex' | 'grok' | 'muse' | 'copilot' | 'dsh' | 'custom';
 
 export function isAgentProvider(value: unknown): value is AgentProvider {
-  return value === 'claude' || value === 'opencode' || value === 'codex' || value === 'grok' || value === 'muse' || value === 'dsh' || value === 'custom';
+  return value === 'claude' || value === 'opencode' || value === 'codex' || value === 'grok' || value === 'muse' || value === 'copilot' || value === 'dsh' || value === 'custom';
 }
 
 /** A Claude model alias the hire dialog and queue can request explicitly (see server/agents.ts). */
@@ -52,10 +52,10 @@ export function isAgentEffort(value: unknown): value is AgentEffort {
   return value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh' || value === 'max';
 }
 
-/** Which agent a worker runs: its provider, and optionally the model and (Claude/Grok/Muse) the reasoning effort. */
+/** Which agent a worker runs: its provider, and optionally the model and (Claude/Grok/Muse/Copilot) the reasoning effort. */
 export interface AgentChoice {
   provider: AgentProvider;
-  /** An OpenCode provider/model id, a Claude model alias, or a Grok/Muse model id; unset for the provider's own default. */
+  /** An OpenCode provider/model id, a Claude model alias, or a Grok/Muse/Copilot model id; unset for the provider's own default. */
   model?: string;
   effort?: AgentEffort;
 }
@@ -80,19 +80,35 @@ export interface WorkerTask {
   summary: string;
 }
 
+/** One question of an AskUserQuestion call, as the worker asked it. */
+export interface AskQuestion {
+  question: string;
+  header: string;
+  multiSelect: boolean;
+  options: { label: string; description: string; preview?: string }[];
+}
+
+/** A question a worker is waiting on, asked in the office instead of its terminal (see WorkerInfo.question). */
+export interface WorkerQuestion {
+  id: string;
+  questions: AskQuestion[];
+}
+
 export interface WorkerInfo {
   id: string;
   /** 'agent' runs the selected provider; 'shell' is a plain shared login shell. */
   kind: WorkerKind;
   provider?: AgentProvider;
-  /** Model requested for this worker, instead of the office's configured default: an OpenCode provider/model id, a Claude model alias, a Grok/Muse model id, or an opaque DeepSeek Harness catalog id. */
+  /** Model requested for this worker, instead of the office's configured default: an OpenCode provider/model id, a Claude model alias, a Grok/Muse/Copilot model id, or an opaque DeepSeek Harness catalog id. */
   model?: string;
-  /** Reasoning effort requested for this worker, when one was chosen (Claude, Grok, Muse or DeepSeek Harness). */
+  /** Reasoning effort requested for this worker, when one was chosen (Claude, Grok, Muse, Copilot or DeepSeek Harness). */
   effort?: AgentEffort;
   deskId: string;
   name: string;
   color: string;
   status: WorkerStatus;
+  /** Set while it waits on an AskUserQuestion answer from the office UI: whoever opens its desk answers it (see 'worker.answer'). */
+  question?: WorkerQuestion;
   /** True once someone opened the terminal after the last done / needs_input. */
   acked: boolean;
   /** When it last went to done or needs_input (ms), so N goes to whoever has waited longest first. */
@@ -1132,6 +1148,8 @@ export type ClientMsg =
   | { t: 'worker.worktree'; workerId: string }
   /** Puts a lost worker's worktree back and starts it again (see WorkerInfo.lost); `all`: every lost worker on the floor. */
   | { t: 'worker.rebuild'; workerId: string; all?: boolean }
+  /** Answers a worker's question: `answers[i]` is what was picked or typed for question i; `dismiss` throws the question away instead. */
+  | { t: 'worker.answer'; workerId: string; questionId: string; answers?: string[][]; dismiss?: boolean }
   | { t: 'worker.attach'; workerId: string }
   | { t: 'worker.detach'; workerId: string }
   /** With `issue`, the prompt hands the worker that GitHub issue, which is taken as for worker.spawn. */

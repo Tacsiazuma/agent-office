@@ -9,6 +9,7 @@ export const PROVIDER_LABEL: Record<AgentProvider, string> = {
   codex: 'Codex',
   grok: 'Grok',
   muse: 'Muse Code',
+  copilot: 'GitHub Copilot',
   dsh: 'DeepSeek Harness',
   custom: 'Custom',
 };
@@ -28,10 +29,10 @@ export const EFFORT_LABEL: Record<AgentEffort, string> = {
   max: 'Max',
 };
 
-/** A short badge for the task card / sidebar: "Opus", "Opus · High", or the raw OpenCode/Grok/Muse/DeepSeek Harness model id. */
+/** A short badge for the task card / sidebar: "Opus", "Opus · High", or the raw OpenCode/Grok/Muse/Copilot/DeepSeek Harness model id. */
 export function modelBadge(provider: AgentProvider | undefined, model: string | undefined, effort: AgentEffort | undefined): string | undefined {
   if (!model && !effort) return undefined;
-  if (provider === 'claude' || provider === 'grok' || provider === 'muse' || provider === 'dsh') {
+  if (provider === 'claude' || provider === 'grok' || provider === 'muse' || provider === 'copilot' || provider === 'dsh') {
     const label = provider === 'claude' && model && model in CLAUDE_MODEL_LABEL ? CLAUDE_MODEL_LABEL[model as ClaudeModel] : model;
     const parts = [label, effort ? EFFORT_LABEL[effort] : undefined].filter((v): v is string => !!v);
     return parts.length ? parts.join(' · ') : undefined;
@@ -41,7 +42,7 @@ export function modelBadge(provider: AgentProvider | undefined, model: string | 
 
 /** Providers the server says this project can start. */
 export function supportedProviders(project: ProjectInfo | null): AgentProvider[] {
-  const values = project?.agentProviders?.filter((p): p is AgentProvider => p === 'claude' || p === 'opencode' || p === 'codex' || p === 'grok' || p === 'muse' || p === 'dsh' || p === 'custom') ?? [];
+  const values = project?.agentProviders?.filter((p): p is AgentProvider => p === 'claude' || p === 'opencode' || p === 'codex' || p === 'grok' || p === 'muse' || p === 'copilot' || p === 'dsh' || p === 'custom') ?? [];
   if (values.length) return [...new Set(values)];
   return project?.defaultProvider && PROVIDER_LABEL[project.defaultProvider] ? [project.defaultProvider] : ['claude'];
 }
@@ -61,7 +62,7 @@ export function providerLabel(provider: AgentProvider | undefined, project: Proj
 
 export function providerUsageTracked(provider: AgentProvider | undefined, project: ProjectInfo | null, usage?: Usage): boolean {
   const selected = resolvedProvider(provider, project);
-  return selected === 'claude' || ((selected === 'opencode' || selected === 'codex' || selected === 'grok' || selected === 'muse' || selected === 'dsh' || selected === 'custom') && usage !== undefined);
+  return selected === 'claude' || ((selected === 'opencode' || selected === 'codex' || selected === 'grok' || selected === 'muse' || selected === 'copilot' || selected === 'dsh' || selected === 'custom') && usage !== undefined);
 }
 
 export type ProviderUsageState = 'tracked' | 'waiting' | 'untracked';
@@ -74,6 +75,7 @@ export function providerUsageState(provider: AgentProvider | undefined, project:
   if (selected === 'codex') return usage ? 'tracked' : 'waiting';
   if (selected === 'grok') return usage ? 'tracked' : 'untracked';
   if (selected === 'muse') return usage ? 'tracked' : 'untracked';
+  if (selected === 'copilot') return usage ? 'tracked' : 'untracked';
   if (selected === 'dsh') return usage ? 'tracked' : 'waiting';
   if (selected === 'custom') return usage ? 'tracked' : 'untracked';
   return 'untracked';
@@ -95,6 +97,7 @@ export function providerUsageNote(provider: AgentProvider): string {
   if (provider === 'codex') return 'Review Office hooks in /hooks to enable tracking. Codex reports root-session tokens; subagents are excluded and cost is unavailable.';
   if (provider === 'grok') return 'Grok spend is not metered by the office; token totals stay in the worker terminal.';
   if (provider === 'muse') return 'Muse spend is not metered by the office; token totals stay in the worker terminal.';
+  if (provider === 'copilot') return 'GitHub Copilot spend is not metered by the office; usage stays in the worker terminal.';
   if (provider === 'dsh') return 'DeepSeek Harness reports context usage over ACP after its first turn; cost may be unavailable.';
   if (provider === 'custom') return 'Usage is untracked unless compatible Claude Code hooks report it.';
   return 'OpenCode reports model/provider estimates; they are not billing, and arrive after the first report.';
@@ -123,7 +126,7 @@ export interface ProviderPicker {
   value(): AgentProvider;
   /** The optional initial model override: an OpenCode provider/model id, a Claude model alias, a Grok/Muse model id, or a DeepSeek Harness catalog id. */
   model(): string | undefined;
-  /** The optional Claude, Grok, Muse or DeepSeek Harness reasoning effort. */
+  /** The optional Claude, Grok, Muse, Copilot or DeepSeek Harness reasoning effort. */
   effort(): AgentEffort | undefined;
   /** Reports a visible field error for an invalid nonempty OpenCode model. */
   valid(): boolean;
@@ -139,6 +142,7 @@ export interface AgentFields extends ProviderPicker {
 const MODEL_MAX = 256;
 const GROK_MODEL_MAX = 64;
 const MUSE_MODEL_MAX = 128;
+const COPILOT_MODEL_MAX = 128;
 const DSH_MODEL_MAX = 256;
 let modelList: string[] | null = null;
 let modelListAt = 0;
@@ -155,6 +159,10 @@ function validModel(value: string): boolean {
 
 function validGrokModel(value: string): boolean {
   return value.length > 0 && value.length <= GROK_MODEL_MAX && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) && !/[\s\p{Cc}\p{Cf}]/u.test(value);
+}
+
+function validCopilotModel(value: string): boolean {
+  return value.length > 0 && value.length <= COPILOT_MODEL_MAX && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) && !/[\s\p{Cc}\p{Cf}]/u.test(value);
 }
 
 function validMuseModel(value: string): boolean {
@@ -278,6 +286,27 @@ export function agentFields(project: ProjectInfo | null, id: string, initial: Ag
     h('small.provider-model-hint', {}, 'Optional model id (for example muse-spark-1.3-contributor) and effort for this worker.'),
   );
 
+  const copilotModelInput = h('input', {
+    type: 'text',
+    id: `${id}-copilot-model`,
+    placeholder: 'Default (Copilot settings)',
+    'aria-label': 'GitHub Copilot model',
+    autocomplete: 'off',
+    maxlength: COPILOT_MODEL_MAX,
+  }) as HTMLInputElement;
+  const copilotEffortSelect = h('select', { id: `${id}-copilot-effort`, 'aria-label': 'GitHub Copilot reasoning effort' }) as HTMLSelectElement;
+  copilotEffortSelect.append(h('option', { value: '' }, 'Default'));
+  for (const e of AGENT_EFFORTS) copilotEffortSelect.append(h('option', { value: e }, EFFORT_LABEL[e]));
+  const copilotChoice = h(
+    'div.provider-model.copilot-model',
+    {},
+    h('label', { for: `${id}-copilot-model` }, 'Model'),
+    copilotModelInput,
+    h('label', { for: `${id}-copilot-effort` }, 'Effort'),
+    copilotEffortSelect,
+    h('small.provider-model-hint', {}, 'Optional model id (for example claude-sonnet-4.5, or auto) and effort for this worker.'),
+  );
+
   const dshModelInput = h('input', {
     type: 'text',
     id: `${id}-dsh-model`,
@@ -299,7 +328,7 @@ export function agentFields(project: ProjectInfo | null, id: string, initial: Ag
     h('small.provider-model-hint', {}, 'Optional model id from DeepSeek Harness\u2019s catalog, and effort; leave empty to use the profile default.'),
   );
 
-  const element = h('div.provider-choice', {}, h('label', { for: id }, label), select, note, modelChoice, claudeChoice, grokChoice, museChoice, dshChoice);
+  const element = h('div.provider-choice', {}, h('label', { for: id }, label), select, note, modelChoice, claudeChoice, grokChoice, museChoice, copilotChoice, dshChoice);
   const fillGrokModels = (models: string[], selected?: string) => {
     const keep = selected && validGrokModel(selected) ? selected : '';
     grokModelSelect.replaceChildren(h('option', { value: '' }, 'Default (Grok settings)'));
@@ -346,6 +375,7 @@ export function agentFields(project: ProjectInfo | null, id: string, initial: Ag
     claudeChoice.classList.toggle('hidden', provider !== 'claude');
     grokChoice.classList.toggle('hidden', provider !== 'grok');
     museChoice.classList.toggle('hidden', provider !== 'muse');
+    copilotChoice.classList.toggle('hidden', provider !== 'copilot');
     dshChoice.classList.toggle('hidden', provider !== 'dsh');
     loadModels();
   };
@@ -354,6 +384,7 @@ export function agentFields(project: ProjectInfo | null, id: string, initial: Ag
     const claude = select.value === 'claude';
     const grok = select.value === 'grok';
     const muse = select.value === 'muse';
+    const copilot = select.value === 'copilot';
     const dsh = select.value === 'dsh';
     claudeModelSelect.value = claude && c.model && (CLAUDE_MODELS as readonly string[]).includes(c.model) ? c.model : '';
     effortSelect.value = claude && c.effort ? c.effort : '';
@@ -361,11 +392,14 @@ export function agentFields(project: ProjectInfo | null, id: string, initial: Ag
     grokEffortSelect.value = grok && c.effort ? c.effort : '';
     museModelInput.value = muse && c.model ? c.model : '';
     museEffortSelect.value = muse && c.effort ? c.effort : '';
+    copilotModelInput.value = copilot && c.model ? c.model : '';
+    copilotEffortSelect.value = copilot && c.effort ? c.effort : '';
     dshModelInput.value = dsh && c.model ? c.model : '';
     dshEffortSelect.value = dsh && c.effort ? c.effort : '';
     modelInput.value = select.value === 'opencode' && c.model ? c.model : '';
     modelInput.setCustomValidity('');
     museModelInput.setCustomValidity('');
+    copilotModelInput.setCustomValidity('');
     dshModelInput.setCustomValidity('');
     setModelVisibility(select.value as AgentProvider);
   };
@@ -374,12 +408,14 @@ export function agentFields(project: ProjectInfo | null, id: string, initial: Ag
   modelInput.addEventListener('focus', loadModels);
   modelInput.addEventListener('input', () => modelInput.setCustomValidity(''));
   museModelInput.addEventListener('input', () => museModelInput.setCustomValidity(''));
+  copilotModelInput.addEventListener('input', () => copilotModelInput.setCustomValidity(''));
   dshModelInput.addEventListener('input', () => dshModelInput.setCustomValidity(''));
   const value = () => (options.includes(select.value as AgentProvider) ? (select.value as AgentProvider) : fallback);
   const effort = () => {
     if (select.value === 'claude' && effortSelect.value) return effortSelect.value as AgentEffort;
     if (select.value === 'grok' && grokEffortSelect.value) return grokEffortSelect.value as AgentEffort;
     if (select.value === 'muse' && museEffortSelect.value) return museEffortSelect.value as AgentEffort;
+    if (select.value === 'copilot' && copilotEffortSelect.value) return copilotEffortSelect.value as AgentEffort;
     if (select.value === 'dsh' && dshEffortSelect.value) return dshEffortSelect.value as AgentEffort;
     return undefined;
   };
@@ -389,6 +425,10 @@ export function agentFields(project: ProjectInfo | null, id: string, initial: Ag
     if (select.value === 'muse') {
       const v = museModelInput.value;
       return validMuseModel(v) ? v : undefined;
+    }
+    if (select.value === 'copilot') {
+      const v = copilotModelInput.value;
+      return validCopilotModel(v) ? v : undefined;
     }
     if (select.value === 'dsh') {
       const v = dshModelInput.value;
@@ -414,6 +454,16 @@ export function agentFields(project: ProjectInfo | null, id: string, initial: Ag
         const okay = validMuseModel(museModelInput.value);
         museModelInput.setCustomValidity(okay ? '' : 'Use a Muse model id without whitespace or control characters (up to 128 characters).');
         if (!okay) museModelInput.reportValidity();
+        return okay;
+      }
+      if (select.value === 'copilot') {
+        if (!copilotModelInput.value) {
+          copilotModelInput.setCustomValidity('');
+          return true;
+        }
+        const okay = validCopilotModel(copilotModelInput.value);
+        copilotModelInput.setCustomValidity(okay ? '' : 'Use a Copilot model id without whitespace or control characters (up to 128 characters).');
+        if (!okay) copilotModelInput.reportValidity();
         return okay;
       }
       if (select.value === 'dsh') {

@@ -58,6 +58,7 @@ import { openTerminal, openTerminalFor, routeTerminalMessage, type TerminalFind 
 import { openSearch } from './ui/search';
 import { openChanges, openChangesFor, routeChangesMessage } from './ui/changes';
 import { openRepoPulls, workerRepos } from './ui/repos';
+import { openQuestion, questionUpdate } from './ui/question';
 import { openPrompt, confirmDialog, sendHomeDialog, lostWorktreeDialog, routeWorktreeMessage, worktreePref } from './ui/prompt';
 import { issuePrompt, openBoard } from './ui/boards';
 import { openIssue, openPull, routePullMessage } from './ui/pull';
@@ -2056,6 +2057,8 @@ function syncWorkers() {
     v.model.setAction(w.action);
     v.model.setPr(workerPr(w, store.pulls.items, store.queue.tasks));
     v.model.setLost(!!w.lost);
+    v.model.setAsking(!!w.question);
+    questionUpdate(w);
     const engineBadge = w.kind === 'agent' ? modelBadge(w.provider, w.model, w.effort) : undefined;
     v.model.setTask(meetingCard(w) ?? (w.task && w.kind === 'agent' ? { ...w.task, name: `${providerLabel(w.provider, store.project)}${engineBadge ? ` · ${engineBadge}` : ''} · ${w.task.name}` } : w.task));
     const deskDef = plan().byId.get(w.deskId);
@@ -2642,6 +2645,8 @@ function openWorkerTerminal(id: string, find?: TerminalFind) {
   const w = store.workers.get(id);
   if (!w) return;
   if (w.lost) return fixLostWorktree(w);
+  // It's waiting on an answer to a question it asked: that's what opening its desk is for.
+  if (w.question && !find) return openQuestion(net, { ...w, question: w.question });
   if (isAsleep(w.status)) resumeWorker(w);
   openTerminal(net, id, () => openWorkerChanges(id), find);
 }

@@ -1525,6 +1525,8 @@ export class Worker {
   private pr: WorkerPr | undefined;
   /** Its worktree was deleted outside the office (WorkerInfo.lost): its bubble says so until it's fixed. */
   private lost = false;
+  /** Waiting on an answer to a question it asked in the office (see WorkerInfo.question). */
+  private asking = false;
   private nameTag: THREE.Sprite | null = null;
   private eyes: THREE.Mesh[] = [];
   private blinkAt = Math.random() * 4;
@@ -1826,6 +1828,12 @@ export class Worker {
     this.drawBubble();
   }
 
+  setAsking(asking: boolean) {
+    if (this.asking === asking) return;
+    this.asking = asking;
+    this.drawBubble();
+  }
+
   /** Sent home: its light goes out, its face falls, and its things pop into a box in its arms. `farewell` goes over its head. */
   leave(farewell: string) {
     if (this.leaving) return;
@@ -1878,7 +1886,7 @@ export class Worker {
 
   private drawBubble() {
     if (this.leaving) return;
-    const { status, bouncing: bounce, task, pr, lost } = this;
+    const { status, bouncing: bounce, task, pr, lost, asking } = this;
     const hot = status === 'needs_input' || (status === 'done' && bounce);
     const bg = hot ? (status === 'done' ? '#caffbf' : '#ffd6e0') : status === 'working' ? '#ffec99' : '#fffaf3';
     const border = pr && PR_INK[pr.state];
@@ -1886,8 +1894,8 @@ export class Worker {
     const prLabel = pr && status !== 'working' && status !== 'needs_input' && status !== 'starting' ? `${PR_ICON[pr.state]} PR #${pr.number} ${pr.state}` : undefined;
     const bubble = lost
       ? '🌿 worktree deleted'
-      : prLabel ?? (status === 'needs_input' ? '❗ needs you' : status === 'done' && bounce ? '✅ done!' : status === 'working' ? '⌨️ working' : isAsleep(status) ? '💤' : '');
-    const key = `${lost}|${border}|${prLabel}|${task ? `${status}|${bounce}|${task.name}|${task.summary}` : bubble}`;
+      : prLabel ?? (status === 'needs_input' ? (asking ? '❓ asks you' : '❗ needs you') : status === 'done' && bounce ? '✅ done!' : status === 'working' ? '⌨️ working' : isAsleep(status) ? '💤' : '');
+    const key = `${lost}|${asking}|${border}|${prLabel}|${task ? `${status}|${bounce}|${task.name}|${task.summary}` : bubble}`;
     if (key === this.bubbleKey) return;
     this.bubbleKey = key;
     if (this.bubble) {

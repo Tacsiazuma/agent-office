@@ -38,6 +38,7 @@ type Fixture = {
   codex: string;
   grok: string;
   muse: string;
+  copilot: string;
   custom: string;
   read(): Invocation[];
   close(): void;
@@ -140,6 +141,7 @@ function fixture(): Fixture {
   const codex = path.join(bin, 'codex');
   const grok = path.join(bin, 'grok');
   const muse = path.join(bin, 'muse');
+  const copilot = path.join(bin, 'copilot');
   mkdirSync(data, { recursive: true });
   mkdirSync(bin, { recursive: true });
   writeFileSync(claude, fakeAgent, { mode: 0o700 });
@@ -148,11 +150,13 @@ function fixture(): Fixture {
   writeFileSync(codex, fakeAgent, { mode: 0o700 });
   writeFileSync(grok, fakeAgent, { mode: 0o700 });
   writeFileSync(muse, fakeAgent, { mode: 0o700 });
+  writeFileSync(copilot, fakeAgent, { mode: 0o700 });
   chmodSync(claude, 0o700);
   chmodSync(opencode, 0o700);
   chmodSync(custom, 0o700);
   chmodSync(grok, 0o700);
   chmodSync(muse, 0o700);
+  chmodSync(copilot, 0o700);
   writeFileSync(log, '');
   return {
     root,
@@ -163,6 +167,7 @@ function fixture(): Fixture {
     codex,
     grok,
     muse,
+    copilot,
     custom,
     read() {
       if (!existsSync(log)) return [];
@@ -738,6 +743,67 @@ test('Grok workers isolate GROK_HOME, follow authenticated hooks, and resume the
   assert.equal(restored.get(worker.id)?.status, 'idle');
 });
 
+
+test('Copilot workers load the office plugin and MCP config, follow authenticated hooks, and resume their session', async (t) => {
+  const f = fixture();
+  isolateProviderEnvironment(f, t);
+  const oldLog = process.env.FAKE_AGENT_LOG;
+  process.env.FAKE_AGENT_LOG = f.log;
+  t.after(() => { if (oldLog === undefined) delete process.env.FAKE_AGENT_LOG; else process.env.FAKE_AGENT_LOG = oldLog; f.close(); });
+  const workers = new WorkerManager(f.root, f.data, f.claude, ['--claude-only'], { url: 'http://127.0.0.1:1', token: '' }, events([]), ledger(f.data));
+  t.after(() => workers.shutdown());
+  const worker = workers.spawn('desk-1', 'test', '- fix the login', false, 'agent', 'copilot', 'claude-sonnet-4.5', 'high');
+  assert.notEqual(typeof worker, 'string'); if (typeof worker === 'string') return;
+  const calls = await waitFor(f.read, x => x.some(r => r.kind === 'copilot'));
+  const first = calls.find(r => r.kind === 'copilot')!;
+  const token = first.env.hookToken!;
+  assert.equal(worker.status, 'starting');
+  assert.equal(worker.model, 'claude-sonnet-4.5');
+  assert.equal(worker.effort, 'high');
+  const sessionId = worker.sessionId!;
+  assert.match(sessionId, /^[0-9a-f-]{36}$/i);
+  const at = (flag: string) => first.args[first.args.indexOf(flag) + 1];
+  assert.equal(at('--plugin-dir'), path.join(f.data, 'copilot-plugin'));
+  assert.equal(at('--additional-mcp-config'), `@${path.join(f.data, 'agent-office-copilot-mcp.json')}`);
+  assert.equal(at('--session-id'), sessionId);
+  assert.equal(at('--model'), 'claude-sonnet-4.5');
+  assert.equal(at('--reasoning-effort'), 'high');
+  assert.equal(first.args.at(-1), '--interactive=- fix the login');
+  assert.equal(first.args.includes('--claude-only'), false);
+  assert.equal(calls.some(r => r.kind === 'claude'), false);
+  const hook = (event: string, extra = {}) => workers.handleCopilotHook(worker.id, token, event, { sessionId, ...extra });
+  assert.equal(workers.handleCopilotHook(worker.id, 'wrong', 'sessionStart', { sessionId }), false);
+  assert.equal(hook('sessionStart', { source: 'new' }), true);
+  assert.equal(worker.status, 'idle');
+  assert.equal(hook('userPromptSubmitted', { prompt: 'Implement the actual task' }), true);
+  assert.equal(worker.status, 'working');
+  assert.equal(hook('preToolUse', { toolName: 'bash' }), true);
+  assert.equal(worker.status, 'working');
+  assert.equal(hook('permissionRequest', { toolName: 'bash' }), true);
+  assert.equal(worker.status, 'needs_input');
+  assert.equal(hook('postToolUse', { toolName: 'bash' }), true);
+  assert.equal(worker.status, 'working');
+  assert.equal(hook('agentStop', { agent_id: 'child' }), false);
+  assert.equal(worker.status, 'working');
+  assert.equal(hook('agentStop', { stopReason: 'end_turn' }), true);
+  assert.equal(worker.status, 'done');
+  assert.equal(workers.handleCopilotHook(worker.id, token, 'agentStop', { sessionId: 'someone-else' }), false);
+  assert.equal(workers.handleGrokHook(worker.id, token, 'Stop', { sessionId }), false);
+  workers.shutdown();
+  const restored = manager(f, f.claude, [], []);
+  t.after(() => restored.shutdown());
+  await restored.start();
+  const nextCalls = await waitFor(f.read, x => x.filter(r => r.kind === 'copilot' && !r.stdin).length >= 2);
+  const next = nextCalls.filter(r => r.kind === 'copilot' && !r.stdin).at(-1)!;
+  assert.ok(next.args.includes(`--resume=${sessionId}`));
+  assert.equal(next.args.includes('--session-id'), false);
+  assert.notEqual(next.env.hookToken, token);
+  assert.equal(restored.get(worker.id)?.provider, 'copilot');
+  assert.equal(restored.get(worker.id)?.model, 'claude-sonnet-4.5');
+  assert.equal(restored.handleCopilotHook(worker.id, token, 'agentStop', { sessionId }), false);
+  assert.equal(restored.handleCopilotHook(worker.id, next.env.hookToken!, 'sessionStart', { sessionId, source: 'resume' }), true);
+  assert.equal(restored.get(worker.id)?.status, 'idle');
+});
 
 test('Muse workers isolate XDG, follow authenticated hooks, resume by uuid, and paste a follow-up prompt', async (t) => {
   const f = fixture();
@@ -1519,4 +1585,69 @@ test("a worker whose worktree was deleted outside the office waits, marked lost,
   assert.equal(git(path.join(f.root, gone.worktree!.path), 'rev-parse', 'HEAD'), gone.worktree!.base);
   assert.equal(after.get(gone.id)?.lost, undefined);
   assert.deepEqual(toasts, []);
+});
+
+test("a Claude worker's AskUserQuestion waits in the office for an answer, or falls back to the terminal", async (t) => {
+  const f = fixture();
+  const updates: WorkerInfo[] = [];
+  isolateProviderEnvironment(f, t);
+  const previousLog = process.env.FAKE_AGENT_LOG;
+  process.env.FAKE_AGENT_LOG = f.log;
+  t.after(() => {
+    if (previousLog === undefined) delete process.env.FAKE_AGENT_LOG;
+    else process.env.FAKE_AGENT_LOG = previousLog;
+    f.close();
+  });
+  const workers = manager(f, f.claude, updates);
+  t.after(() => workers.shutdown());
+  const worker = workers.spawn('desk-1', 'test', 'ask me things');
+  assert.equal(typeof worker, 'object');
+  if (typeof worker === 'string') return;
+  const records = await waitFor(() => f.read(), (r) => r.some((x) => x.kind === 'claude' && x.args.includes('--settings')));
+  const token = records.find((x) => x.kind === 'claude' && x.args.includes('--settings'))!.env.hookToken!;
+  const input = {
+    questions: [
+      { question: 'Which database?', header: 'DB', multiSelect: false, options: [{ label: 'Postgres', description: 'relational' }, { label: 'SQLite', description: 'a file', preview: 'file.db' }] },
+      { question: 'Which extras?', header: 'Extras', multiSelect: true, options: [{ label: 'Auth', description: '' }, { label: 'Cache', description: '' }] },
+    ],
+  };
+  const settings = JSON.parse(readFileSync(path.join(f.data, 'claude-hooks.json'), 'utf8'));
+  const askHook = settings.hooks.PreToolUse.find((h: { matcher?: string }) => h.matcher === 'AskUserQuestion');
+  assert.ok(askHook, 'the settings hook AskUserQuestion into the office');
+  assert.ok(askHook.hooks[0].timeout > 3600, 'the hook may wait hours for an answer');
+  assert.match(askHook.hooks[0].command, /hooks\/claude\/ask/);
+
+  // Nobody in the office to answer: the question stays in the terminal.
+  assert.equal(workers.handleAsk(worker.id, 'wrong', { tool_input: input }, () => {}), undefined);
+  assert.equal(await workers.handleAsk(worker.id, token, { tool_input: input }, () => {}), null);
+  assert.equal(workers.get(worker.id)?.question, undefined);
+
+  workers.askable = () => true;
+  const answered = workers.handleAsk(worker.id, token, { tool_input: input }, () => {})!;
+  const asked = workers.get(worker.id)!;
+  assert.equal(asked.status, 'needs_input');
+  assert.equal(asked.question?.questions.length, 2);
+  assert.equal(asked.question?.questions[0].options[1].preview, 'file.db');
+  assert.equal(asked.question?.questions[1].multiSelect, true);
+  assert.match(String(workers.answer(worker.id, 'stale', [[]], false)), /no longer waiting/);
+  assert.equal(workers.answer(worker.id, asked.question!.id, [['SQLite'], ['Auth', 'my own']], false), undefined);
+  const out = (await answered) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } };
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, /Which database\? → SQLite/);
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, /Which extras\? → Auth, my own/);
+  assert.equal(workers.get(worker.id)?.question, undefined);
+  assert.equal(workers.get(worker.id)?.status, 'working');
+
+  // Thrown away: the worker is told to go on with its own guess.
+  const dismissed = workers.handleAsk(worker.id, token, { tool_input: input }, () => {})!;
+  assert.equal(workers.answer(worker.id, workers.get(worker.id)!.question!.id, undefined, true), undefined);
+  assert.match(JSON.stringify(await dismissed), /dismissed this question/);
+
+  // Cut off (Esc in the terminal): the question goes away and the hook prints nothing.
+  let cut = () => {};
+  const interrupted = workers.handleAsk(worker.id, token, { tool_input: input }, (fn) => (cut = fn))!;
+  assert.ok(workers.get(worker.id)?.question);
+  cut();
+  assert.equal(await interrupted, null);
+  assert.equal(workers.get(worker.id)?.question, undefined);
 });

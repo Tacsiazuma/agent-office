@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { CodexUsageReader } from './codex-usage.js';
 import headless from '@xterm/headless';
 import serialize from '@xterm/addon-serialize';
-import type { AgentChoice, AgentEffort, AgentProvider, Run, TerminalHit, WorkerInfo, WorkerKind, WorkerRepo, WorkerStatus, WorkerTask } from '../shared/protocol.js';
+import type { AgentChoice, AgentEffort, AskQuestion, AgentProvider, Run, TerminalHit, WorkerInfo, WorkerKind, WorkerRepo, WorkerStatus, WorkerTask } from '../shared/protocol.js';
 import { FAILS_TO_DESPAIR, outputFailed, toolAction } from '../shared/actions.js';
 import { FLAG_BOLD, FLAG_DIM, FLAG_INVERSE, RGB_FLAG, isAgentEffort, isClaudeModel } from '../shared/protocol.js';
 import { WORKSPACE_FILES, WORKTREES_DIR, Worktrees, describeWork, workspaceOf, type WorktreeCleanup, type WorktreeRef, type WorktreeState } from './worktrees.js';
@@ -23,12 +23,13 @@ import { TaskNamer, fallbackTask } from './tasks.js';
 import { addUsage, newTracker, restoreTracker, scanTracker, trackerUsage, zeroUsage, type Ledger, type UsageTracker } from './usage.js';
 import { PtyHost, SCROLLBACK, type Adopted, type Pty } from './ptys.js';
 import { codexHookArgs, normalizeCodexHook, writeCodexHook } from './codex.js';
+import { normalizeCopilotHook, withoutCopilotLaunchArgs, writeCopilotPlugin } from './copilot.js';
 import { normalizeGrokHook, withoutGrokLaunchArgs, writeGrokHome } from './grok.js';
 import { normalizeMuseHook, withoutMuseLaunchArgs, writeMuseHome } from './muse.js';
 import { reportedUsage } from './reported-usage.js';
-import { configuredProvider, isValidDshModel, isValidGrokModel, isValidMuseModel, isValidOpenCodeModel, validateWorkerEffort, validateWorkerModel } from './agents.js';
+import { configuredProvider, isValidCopilotModel, isValidDshModel, isValidGrokModel, isValidMuseModel, isValidOpenCodeModel, validateWorkerEffort, validateWorkerModel } from './agents.js';
 import { mergeOpenCodeConfigContent, openCodePluginSpecifier, writeOpenCodePlugin, type OpenCodeStatusEvent } from './opencode.js';
-import { MCP_READ_ONLY, codexMcpArgs, openCodeMcp, writeClaudeMcpConfig } from './office-workers.js';
+import { MCP_READ_ONLY, codexMcpArgs, openCodeMcp, writeClaudeMcpConfig, writeCopilotMcpConfig } from './office-workers.js';
 import { ScrollbackStore, searchTerminal, terminalTail } from './history.js';
 import { DSH_PROFILE_DEFAULT, DshSession, dshArgs, terminalSafe, writeDshPatch } from './dsh.js';
 import { DropStore } from './drops.js';
@@ -140,6 +141,8 @@ export interface RunAs {
 
 interface Worker {
   info: WorkerInfo;
+  /** The AskUserQuestion it waits on: its hook call stays open until `finish` hands the hook its answer (null: ask in the terminal after all). */
+  ask?: { id: string; finish(output: object | null): void };
   /** The account that hired it, whose sign-ins it runs on. None: the office's own. */
   owner?: string;
   pty?: Pty;
@@ -218,6 +221,10 @@ export class WorkerManager {
   private museConfigHome: string;
   private museDataHome: string;
   private museStateHome: string;
+  /** The plugin that carries Copilot's hooks, loaded with --plugin-dir so no Copilot config is edited. */
+  private copilotPlugin: string;
+  /** Copilot's --additional-mcp-config file for the office's MCP server. */
+  private copilotMcp: string | undefined;
   /** Where the office-queue and office-workers commands are, for the workers' PATH (see writeOfficeCommands). */
   private officeBin: string | undefined;
   /** bin/office-workers.js, which is also the office's MCP server for the agents that take one. */
@@ -239,6 +246,8 @@ export class WorkerManager {
   private saveTimer: NodeJS.Timeout;
   /** How many rows the floor's back office is built out: its desks past that aren't there to hire at (see WING). */
   wing: () => number = () => 0;
+  /** Whether anyone is in the office to answer a worker's question there: if not, it asks in its terminal. */
+  askable: () => boolean = () => false;
 
   constructor(
     private dir: string,
@@ -275,9 +284,11 @@ export class WorkerManager {
     this.museConfigHome = muse.configHome;
     this.museDataHome = muse.dataHome;
     this.museStateHome = muse.stateHome;
+    this.copilotPlugin = writeCopilotPlugin(dataDir).dir;
     this.mcpScript = binScript('office-workers.js');
     this.officeBin = this.writeOfficeCommands();
     this.claudeMcp = this.mcpScript ? writeClaudeMcpConfig(dataDir, this.mcpScript) : undefined;
+    this.copilotMcp = this.mcpScript ? writeCopilotMcpConfig(dataDir, this.mcpScript) : undefined;
     this.agentPath = resolveCommand(agentCmd);
     const claude = this.defaultProvider === 'claude' ? this.agentPath : resolveCommand('claude');
     this.namer = new TaskNamer(claude, childEnv(), () => officePrompt(this.prompts, 'office.namer'), (id, task, ctx) => {
@@ -435,8 +446,8 @@ export class WorkerManager {
       id,
       kind,
       provider: selectedProvider,
-      model: selectedProvider === 'opencode' || selectedProvider === 'claude' || selectedProvider === 'grok' || selectedProvider === 'muse' || selectedProvider === 'dsh' ? model : undefined,
-      effort: selectedProvider === 'claude' || selectedProvider === 'grok' || selectedProvider === 'muse' || selectedProvider === 'dsh' ? effort : undefined,
+      model: selectedProvider === 'opencode' || selectedProvider === 'claude' || selectedProvider === 'grok' || selectedProvider === 'muse' || selectedProvider === 'copilot' || selectedProvider === 'dsh' ? model : undefined,
+      effort: selectedProvider === 'claude' || selectedProvider === 'grok' || selectedProvider === 'muse' || selectedProvider === 'copilot' || selectedProvider === 'dsh' ? effort : undefined,
       deskId,
       name: kind === 'shell' ? `${name} 🐚` : name,
       color: kind === 'shell' ? '#8d99ae' : agent ? agent.color : COLORS[Math.floor(Math.random() * COLORS.length)],
@@ -598,6 +609,7 @@ export class WorkerManager {
   async kill(id: string, cleanup?: WorktreeCleanup, landed?: string, landedRepos?: Record<string, string | undefined>): Promise<{ note?: string; error?: string }> {
     const w = this.workers.get(id);
     if (!w) return {};
+    this.dropAsk(w);
     this.workers.delete(id);
     this.namer.forget(id);
     clearTimeout(w.scanTimer);
@@ -1120,6 +1132,55 @@ export class WorkerManager {
     this.emitUpdate(w);
   }
 
+
+  /**
+   * The hook for a worker's AskUserQuestion: holds the call open while the question waits in the
+   * office (WorkerInfo.question) and resolves with what the hook should print, which turns the call
+   * down with the answer as the reason. Null leaves it to Claude's own prompt in the terminal, which
+   * is what happens with nobody in the office, and when the hook is cut off (Esc in the terminal).
+   */
+  handleAsk(workerId: string, token: string, payload: any, cut: (fn: () => void) => void): Promise<object | null> | undefined {
+    const w = this.workers.get(workerId);
+    if (!w || !w.pty || w.info.kind !== 'agent' || (w.info.provider !== 'claude' && w.info.provider !== 'custom') || !safeEq(token, w.hookToken)) return undefined;
+    const questions = askQuestions(payload?.tool_input);
+    if (!questions.length || !this.askable()) return Promise.resolve(null);
+    this.dropAsk(w);
+    return new Promise((resolve) => {
+      const id = randomUUID();
+      const finish = (output: object | null) => {
+        if (w.ask?.id !== id) return;
+        w.ask = undefined;
+        w.info.question = undefined;
+        resolve(output);
+        if (output && w.info.status === 'needs_input') this.setStatus(w, 'working');
+        else this.emitUpdate(w);
+      };
+      w.ask = { id, finish };
+      cut(() => finish(null));
+      w.info.question = { id, questions };
+      if (w.info.status !== 'needs_input') this.setStatus(w, 'needs_input');
+      else this.emitUpdate(w);
+    });
+  }
+
+  /** What someone answered in the office (`answers[i]` for question i), or threw the question away (`dismiss`). */
+  answer(workerId: string, questionId: string, answers: string[][] | undefined, dismiss: boolean | undefined): string | undefined {
+    const w = this.workers.get(workerId);
+    const q = w?.info.question;
+    if (!w?.ask || !q || q.id !== questionId) return 'That question is no longer waiting';
+    const reason = dismiss
+      ? 'The user dismissed this question in the Agent Office window without answering it. Do not ask it again: go on with the most reasonable assumption and say which one you made.'
+      : `The user already answered in the Agent Office window (nothing was shown in the terminal). Their answers:\n${q.questions
+          .map((x, i) => `- ${x.question} → ${(answers?.[i] ?? []).map((a) => String(a).slice(0, 2000)).join(', ') || '(no answer)'}`)
+          .join('\n')}\nGo on with these answers; do not ask again.`;
+    w.ask.finish({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } });
+    return undefined;
+  }
+
+  private dropAsk(w: Worker) {
+    w.ask?.finish(null);
+  }
+
   /** Claude Code hook callback. */
   handleHook(workerId: string, token: string, event: string, payload: any): boolean {
     const w = this.workers.get(workerId);
@@ -1321,6 +1382,67 @@ export class WorkerManager {
       case 'Stop':
       case 'StopFailure':
       case 'StopCancelled':
+        this.setStatus(w, 'done');
+        break;
+    }
+    this.emitUpdate(w);
+    this.persist();
+    return true;
+  }
+
+  /** Copilot lifecycle hooks, from the office's own plugin (see writeCopilotPlugin), so nothing in ~/.copilot is edited. */
+  handleCopilotHook(workerId: string, token: string, event: string, payload: unknown): boolean {
+    const w = this.workers.get(workerId);
+    if (!w || !w.pty || w.info.kind !== 'agent' || w.info.provider !== 'copilot' || !safeEq(token, w.hookToken)) return false;
+    const report = normalizeCopilotHook(event, payload);
+    if (!report) return false;
+    if (w.info.sessionId && w.info.sessionId !== report.sessionId && report.event !== 'sessionStart') return false;
+    if (!w.info.sessionId || w.info.sessionId !== report.sessionId) {
+      if (w.info.sessionId && w.info.sessionId !== report.sessionId) this.clearTask(w);
+      w.info.sessionId = report.sessionId;
+      this.persist();
+    }
+    w.bootBlocked = false;
+    switch (report.event) {
+      case 'sessionStart':
+        w.info.activity = undefined;
+        if (w.info.status === 'starting' || w.info.status === 'needs_input') this.setStatus(w, 'idle');
+        break;
+      case 'userPromptSubmitted':
+        w.info.action = undefined;
+        if (report.prompt) {
+          w.info.activity = truncate(report.prompt, 80);
+          this.notePrompt(w, report.prompt);
+        }
+        this.setStatus(w, 'working');
+        break;
+      case 'preToolUse':
+        w.info.activity = report.tool ? truncate(report.tool, 80) : 'Using a tool';
+        w.info.action = toolAction(report.tool);
+        this.noteTool(w, w.info.activity);
+        if (/(?:^|[._])(?:AskUserQuestion|ask_user_question|ask_user|request_user_input)$/.test(report.tool ?? '')) this.setStatus(w, 'needs_input');
+        else if (w.info.status !== 'working') this.setStatus(w, 'working');
+        else this.emitUpdate(w);
+        break;
+      case 'permissionRequest':
+        w.info.activity = `Wants permission: ${truncate(report.tool ?? 'tool', 80)}`;
+        this.setStatus(w, 'needs_input');
+        break;
+      case 'postToolUse':
+        if (w.info.status === 'needs_input') {
+          w.leftNeedsInputAt = Date.now();
+          this.setStatus(w, 'working');
+        }
+        break;
+      case 'notification':
+        if (report.notificationType === 'permission_prompt') {
+          if (Date.now() - w.leftNeedsInputAt > LATE_PROMPT_GRACE_MS) this.setStatus(w, 'needs_input');
+        } else if (report.notificationType === 'idle_prompt') {
+          if (w.info.status === 'working') this.setStatus(w, 'done');
+        }
+        break;
+      case 'agentStop':
+      case 'sessionEnd':
         this.setStatus(w, 'done');
         break;
     }
@@ -1577,6 +1699,7 @@ export class WorkerManager {
     const isCodex = !isShell && provider === 'codex';
     const isGrok = !isShell && provider === 'grok';
     const isMuse = !isShell && provider === 'muse';
+    const isCopilot = !isShell && provider === 'copilot';
     const isDsh = !isShell && provider === 'dsh';
     const configured = !isShell && provider === this.defaultProvider;
     const station = DESK_BY_ID.get(info.deskId)?.station;
@@ -1628,13 +1751,27 @@ export class WorkerManager {
         if (info.effort) args.push('--reasoning-effort', info.effort);
         if (prompt) args.push('--', prompt);
       }
+    } else if (isCopilot) {
+      args = withoutCopilotLaunchArgs(args);
+      args.push('--plugin-dir', this.copilotPlugin);
+      if (this.copilotMcp) args.push('--additional-mcp-config', `@${this.copilotMcp}`);
+      if (resumeSessionId) {
+        args.push(`--resume=${resumeSessionId}`);
+      } else {
+        if (!info.sessionId) info.sessionId = randomUUID();
+        args.push('--session-id', info.sessionId);
+      }
+      if (info.model) args.push('--model', info.model);
+      if (info.effort) args.push('--reasoning-effort', info.effort);
+      // `=` so a prompt like "- fix login" is never parsed as a CLI option.
+      if (prompt) args.push(`--interactive=${prompt}`);
     }
     if (isCodex) {
       w.codexTools.clear();
       w.codexPending.clear();
       w.codexPermissionUnknown = false;
     }
-    if (isOpenCode || isCodex || isGrok || isMuse) {
+    if (isOpenCode || isCodex || isGrok || isMuse || isCopilot) {
       w.hookToken = randomBytes(16).toString('hex');
       w.openCodeError = false;
     }
@@ -1711,7 +1848,7 @@ export class WorkerManager {
       this.startFailed(w, (err as Error).message);
       return;
     }
-    if (!isClaude && !isCodex && !isGrok && !isMuse) {
+    if (!isClaude && !isCodex && !isGrok && !isMuse && !isCopilot) {
       clockWork(info, 'idle');
       info.status = 'idle';
     }
@@ -1862,7 +1999,7 @@ export class WorkerManager {
 
   private setTitle(w: Worker, title: string) {
     const clean = title.replace(/^[^\p{L}\p{N}]+/u, '').trim();
-    if (clean && clean !== w.info.title && !/^(claude( code)?|grok( build)?|muse( code)?)$/i.test(clean)) {
+    if (clean && clean !== w.info.title && !/^(claude( code)?|grok( build)?|muse( code)?|(github )?copilot( cli)?)$/i.test(clean)) {
       w.info.title = clean;
       this.emitUpdate(w);
     }
@@ -1875,6 +2012,7 @@ export class WorkerManager {
     const isCodex = info.kind === 'agent' && info.provider === 'codex';
     const isGrok = info.kind === 'agent' && info.provider === 'grok';
     const isMuse = info.kind === 'agent' && info.provider === 'muse';
+    const isCopilot = info.kind === 'agent' && info.provider === 'copilot';
     w.pty = proc;
     proc.onData((data) => {
       term.write(data);
@@ -1885,6 +2023,7 @@ export class WorkerManager {
     proc.onExit(({ exitCode, error, lost }) => {
       if (w.pty !== proc || this.workers.get(info.id) !== w) return;
       w.pty = undefined;
+      this.dropAsk(w);
       if (error) {
         this.startFailed(w, error);
         return;
@@ -1920,7 +2059,7 @@ export class WorkerManager {
     // blocked on a human: folder trust dialog, login, first-run onboarding. Flag it so it jumps.
     setTimeout(() => {
       if (info.status !== 'starting' || w.pty !== proc) return;
-      if (isClaude || isCodex || isGrok || isMuse) {
+      if (isClaude || isCodex || isGrok || isMuse || isCopilot) {
         w.bootBlocked = true;
         info.activity = isCodex
           ? 'Open the terminal: complete login and review Office hooks in /hooks'
@@ -1928,7 +2067,9 @@ export class WorkerManager {
             ? 'Open the terminal: complete login if Grok asks'
             : isMuse
               ? 'Open the terminal: complete login if Muse asks'
-              : 'Waiting on a setup prompt (trust / login) — open the terminal';
+              : isCopilot
+                ? 'Open the terminal: trust the folder or log in if Copilot asks'
+                : 'Waiting on a setup prompt (trust / login) — open the terminal';
         this.setStatus(w, 'needs_input');
       } else this.setStatus(w, 'idle');
     }, 12000);
@@ -2127,6 +2268,22 @@ process.stdin.on('end', () => {
 `,
       { mode: 0o600 },
     );
+    const askHook = path.join(this.dataDir, 'ask-hook.cjs');
+    writeFileSync(
+      askHook,
+      `const http = require('http');
+let body = '';
+process.stdin.on('data', (c) => (body += c));
+process.stdin.on('end', () => {
+  const url = new URL(process.env.AGENT_OFFICE_HOOK_URL + '/hooks/claude/ask');
+  url.searchParams.set('worker', process.env.AGENT_OFFICE_WORKER_ID);
+  const req = http.request(url, { method: 'POST', headers: { authorization: 'Bearer ' + process.env.AGENT_OFFICE_HOOK_TOKEN, 'content-type': 'application/json' } }, (res) => res.pipe(process.stdout));
+  req.on('error', () => {});
+  req.end(body);
+});
+`,
+      { mode: 0o600 },
+    );
     const hooks: Record<string, unknown[]> = {};
     for (const [event, matcher] of events) {
       const curl =
@@ -2138,6 +2295,13 @@ process.stdin.on('end', () => {
         `else ${shq(process.execPath)} ${shq(nodeHook)} ${event} >/dev/null 2>&1; fi; true`;
       hooks[event] = [{ ...(matcher ? { matcher } : {}), hooks: [{ type: 'command', command }] }];
     }
+    // Its questions are asked in the office: this call stays open until they're answered, and what it prints is the answer.
+    const ask =
+      `if [ -z "$AGENT_OFFICE_WORKER_ID" ] || [ -z "$AGENT_OFFICE_HOOK_URL" ]; then exit 0; fi; ` +
+      `if command -v curl >/dev/null 2>&1; then curl -sS -X POST -H "Authorization: Bearer $AGENT_OFFICE_HOOK_TOKEN" -H "Content-Type: application/json" ` +
+      `--data-binary @- "$AGENT_OFFICE_HOOK_URL/hooks/claude/ask?worker=$AGENT_OFFICE_WORKER_ID" 2>/dev/null; ` +
+      `else ${shq(process.execPath)} ${shq(askHook)} 2>/dev/null; fi; true`;
+    hooks.PreToolUse.push({ matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: ask, timeout: ASK_HOOK_TIMEOUT }] });
     // Looking at the office's workers doesn't need anyone's say-so; hiring and sending home still asks.
     const permissions = { allow: MCP_READ_ONLY };
     writeFileSync(this.settingsPath, JSON.stringify({ hooks, permissions }, null, 2), { mode: 0o600 });
@@ -2219,7 +2383,7 @@ process.stdin.on('end', () => {
         const tracker = restoreTracker(s.tracker);
         const provider = s.kind === 'shell'
           ? undefined
-          : s.provider === 'claude' || s.provider === 'opencode' || s.provider === 'codex' || s.provider === 'grok' || s.provider === 'muse' || s.provider === 'dsh' || s.provider === 'custom'
+          : s.provider === 'claude' || s.provider === 'opencode' || s.provider === 'codex' || s.provider === 'grok' || s.provider === 'muse' || s.provider === 'copilot' || s.provider === 'dsh' || s.provider === 'custom'
             ? s.provider
             : tracker.transcript
               ? 'claude'
@@ -2228,8 +2392,8 @@ process.stdin.on('end', () => {
           id: s.id,
           kind: s.kind === 'shell' ? 'shell' : 'agent',
           provider,
-          model: provider === 'opencode' && isValidOpenCodeModel(s.model) ? s.model : provider === 'claude' && isClaudeModel(s.model) ? s.model : provider === 'grok' && isValidGrokModel(s.model) ? s.model : provider === 'muse' && isValidMuseModel(s.model) ? s.model : provider === 'dsh' && isValidDshModel(s.model) ? s.model : undefined,
-          effort: (provider === 'claude' || provider === 'grok' || provider === 'muse' || provider === 'dsh') && isAgentEffort(s.effort) ? s.effort : undefined,
+          model: provider === 'opencode' && isValidOpenCodeModel(s.model) ? s.model : provider === 'claude' && isClaudeModel(s.model) ? s.model : provider === 'grok' && isValidGrokModel(s.model) ? s.model : provider === 'muse' && isValidMuseModel(s.model) ? s.model : provider === 'copilot' && isValidCopilotModel(s.model) ? s.model : provider === 'dsh' && isValidDshModel(s.model) ? s.model : undefined,
+          effort: (provider === 'claude' || provider === 'grok' || provider === 'muse' || provider === 'copilot' || provider === 'dsh') && isAgentEffort(s.effort) ? s.effort : undefined,
           deskId: s.deskId,
           name: s.name ?? 'Worker',
           color: s.color ?? COLORS[0],
@@ -2592,6 +2756,28 @@ function draftPr(info: WorkerInfo, commits: string[], by: string, other?: { home
   else if (closes && other?.home) parts.push(`Part of ${other.home}#${closes}`);
   parts.push(`_Opened from Agent Office by ${by} · ${info.name} at ${DESK_BY_ID.get(info.deskId)?.label ?? info.deskId}_`);
   return { title, body: parts.join('\n\n') };
+}
+
+/** How long the hook may wait for an answer in the office: a day, since nobody may be at their desk for hours. */
+const ASK_HOOK_TIMEOUT = 86400;
+
+/** The questions of an AskUserQuestion call, cut down to what the office shows. */
+function askQuestions(input: any): AskQuestion[] {
+  if (!Array.isArray(input?.questions)) return [];
+  const text = (v: unknown, n: number) => (typeof v === 'string' ? v.slice(0, n) : '');
+  return input.questions
+    .slice(0, 4)
+    .map((q: any): AskQuestion => ({
+      question: text(q?.question, 2000),
+      header: text(q?.header, 40),
+      multiSelect: q?.multiSelect === true,
+      options: (Array.isArray(q?.options) ? q.options : []).slice(0, 8).map((o: any) => ({
+        label: text(o?.label, 200),
+        description: text(o?.description, 1000),
+        ...(typeof o?.preview === 'string' && o.preview ? { preview: o.preview.slice(0, 8000) } : {}),
+      })),
+    }))
+    .filter((q: AskQuestion) => q.question);
 }
 
 function truncate(s: string, n: number) {

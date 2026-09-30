@@ -293,6 +293,25 @@ export async function startServer(cfg: Config) {
 
   // --- Loopback-only endpoint for authenticated agent events -------------------------------
   let webhook!: Webhook;
+  /** A worker's AskUserQuestion: the call waits here for the answer from the office, and gets back what its hook prints. */
+  const askHook = async (req: http.IncomingMessage, res: http.ServerResponse, url: URL) => {
+    let payload: unknown = {};
+    try {
+      const body = await readBody(req);
+      payload = body ? JSON.parse(body) : {};
+    } catch {
+      return send(res, 400, {});
+    }
+    const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
+    const workerId = url.searchParams.get('worker') ?? '';
+    let cut = () => {};
+    const out = workerFloor(workerId)?.workers.handleAsk(workerId, token, payload, (fn) => (cut = fn));
+    if (!out) return send(res, 401, {});
+    res.on('close', () => {
+      if (!res.writableEnded) cut();
+    });
+    send(res, 200, (await out) ?? {});
+  };
   const hookServer = http.createServer(async (req, res) => {
     let url: URL;
     try {
@@ -302,7 +321,8 @@ export async function startServer(cfg: Config) {
     }
     if (url.pathname === '/office/queue') return officeQueue(req, res, url);
     if (url.pathname === '/office/workers' || url.pathname.startsWith('/office/workers/')) return officeWorkers(req, res, url);
-    if (req.method !== 'POST' || !['/hooks/claude', '/hooks/opencode', '/hooks/codex', '/hooks/grok', '/hooks/muse'].includes(url.pathname)) return send(res, 404, { ok: false });
+    if (req.method === 'POST' && url.pathname === '/hooks/claude/ask') return askHook(req, res, url);
+    if (req.method !== 'POST' || !['/hooks/claude', '/hooks/opencode', '/hooks/codex', '/hooks/grok', '/hooks/muse', '/hooks/copilot'].includes(url.pathname)) return send(res, 404, { ok: false });
     let payload: unknown = {};
     try {
       const body = await readBody(req);
@@ -324,7 +344,9 @@ export async function startServer(cfg: Config) {
           ? workers.handleGrokHook(workerId, token, event, payload)
           : url.pathname === '/hooks/muse'
             ? workers.handleMuseHook(workerId, token, event, payload)
-            : workers.handleHook(workerId, token, event, payload);
+            : url.pathname === '/hooks/copilot'
+              ? workers.handleCopilotHook(workerId, token, event, payload)
+              : workers.handleHook(workerId, token, event, payload);
     send(res, ok ? 200 : 401, {});
   });
   /**
@@ -1802,6 +1824,12 @@ export async function startServer(cfg: Config) {
           toastFloor(w.floor, `${who} handed issue #${issue} to ${w.info.name}`);
           takeIssue(c, w.floor, issue);
         }
+        break;
+      }
+      case 'worker.answer': {
+        const w = worker(msg.workerId);
+        const answers = Array.isArray(msg.answers) ? msg.answers.slice(0, 4).map((a) => (Array.isArray(a) ? a.slice(0, 8).map((x) => str(x, 2000)) : [])) : undefined;
+        warn(c, w ? w.floor.workers.answer(w.wid, str(msg.questionId, 64), answers, msg.dismiss === true) : 'No such worker');
         break;
       }
       case 'station.prompt': {
