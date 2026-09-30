@@ -1656,7 +1656,7 @@ function heraldry(p: FloorPalette): string {
   return `#${new THREE.Color().setHSL(hsl.h, 0.62, 0.3).getHexString()}`;
 }
 
-const LECTERN_SIGN: Record<StationKind, string> = { issues: '📜 Ask me', pulls: '🔀 Ask me', queue: '📋 Ask me' };
+const LECTERN_SIGN: Record<StationKind, string> = { issues: '📜 Ask me', pulls: '🔀 Ask me', queue: '📋 Ask me', study: '📖 Ask me' };
 
 /** A board agent's lectern (a scribe's desk): the agent stands behind it, as at the office's kiosk. */
 function lectern(kit: Kit, def: DeskDef): DeskView {

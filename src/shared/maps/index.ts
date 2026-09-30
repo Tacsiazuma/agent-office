@@ -14,7 +14,7 @@ export const OFFICE_MAP = 'office';
 /** The maps that come with the office, besides the office itself. */
 export const BUILTIN_MAPS: readonly MapConfig[] = [CASTLE];
 
-const STATION_KINDS: readonly StationKind[] = ['issues', 'pulls', 'queue'];
+const STATION_KINDS: readonly StationKind[] = ['issues', 'pulls', 'queue', 'study'];
 /** How far in from a table's edge a seat's place setting is; the worker sits 0.85 out from it (see deskSeat), on the bench. */
 const PLACE_IN = 0.35;
 /** How far out from a table's edge the middle of the bench down that side is. */

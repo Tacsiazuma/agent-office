@@ -57,7 +57,8 @@ Or write one from nothing. This is about the least a map can be: a hall, a door,
   "stations": {
     "issues": { "x": -8.6, "z": -11, "rotY": -1.5708 },
     "queue": { "x": -8.6, "z": 9, "rotY": -1.5708 },
-    "pulls": { "x": 8.6, "z": -11, "rotY": 1.5708 }
+    "pulls": { "x": 8.6, "z": -11, "rotY": 1.5708 },
+    "study": { "x": 8.6, "z": 9, "rotY": 1.5708 }
   },
   "council": { "x": 0, "z": -11, "rotY": 0 },
   "boards": {
@@ -93,7 +94,7 @@ A map that won't load (bad JSON, something outside the hall, too few seats, a pr
 | `herald` | `{ x, z, rotY, name, says, ask, button }`: who sends out new workers. `says` goes under their name, `ask` in the box you type in, and `button` on the button. Optional. |
 | `lineup` | `{ x, z, rotY, step: [dx, dz], count }`: the first spot in line, and each next one `step` further on, all facing `rotY`. Optional. |
 | `tables` | `[{ x, z, length, seats, width?, rotY?, sides?, name? }]`: where the workers sit. `seats` is per side (1 to 12); `width` is 1.4 m unless you say; `sides` is `"both"` (the default), `"inner"` or `"outer"`; `rotY` 0 runs the table along z. **Required.** |
-| `stations` | `{ issues, queue, pulls }`, each `{ x, z, rotY }`: the board agents' lecterns. The agent stands 0.55 m from its lectern the way `rotY` points (toward the wall, usually) and faces back across it into the hall. **Required.** |
+| `stations` | `{ issues, queue, pulls, study }`, each `{ x, z, rotY }`: the board agents' lecterns, and the Study agent's (GIM's) desk. The agent stands 0.55 m from its lectern the way `rotY` points (toward the wall, usually) and faces back across it into the hall. **Required.** |
 | `council` | `{ x, z, rotY }`: the meeting table. Five chairs go round it, the head of the table at `rotY`'s side, and its easel 2.5 m behind the other way. **Required.** |
 | `boards` | `{ issues, queue, pulls, services }`, each `{ x, y, z, rotY, width, height, label? }`: the boards on the walls, `rotY` the way each faces. **Required.** |
 | `props` | `[{ kind, x, z, … }]`: everything else, from the list below. |
