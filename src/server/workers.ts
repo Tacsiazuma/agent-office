@@ -23,12 +23,13 @@ import { TaskNamer, fallbackTask } from './tasks.js';
 import { addUsage, newTracker, restoreTracker, scanTracker, trackerUsage, zeroUsage, type Ledger, type UsageTracker } from './usage.js';
 import { PtyHost, SCROLLBACK, type Adopted, type Pty } from './ptys.js';
 import { codexHookArgs, normalizeCodexHook, writeCodexHook } from './codex.js';
+import { normalizeCopilotHook, withoutCopilotLaunchArgs, writeCopilotPlugin } from './copilot.js';
 import { normalizeGrokHook, withoutGrokLaunchArgs, writeGrokHome } from './grok.js';
 import { normalizeMuseHook, withoutMuseLaunchArgs, writeMuseHome } from './muse.js';
 import { reportedUsage } from './reported-usage.js';
-import { configuredProvider, isValidDshModel, isValidGrokModel, isValidMuseModel, isValidOpenCodeModel, validateWorkerEffort, validateWorkerModel } from './agents.js';
+import { configuredProvider, isValidCopilotModel, isValidDshModel, isValidGrokModel, isValidMuseModel, isValidOpenCodeModel, validateWorkerEffort, validateWorkerModel } from './agents.js';
 import { mergeOpenCodeConfigContent, openCodePluginSpecifier, writeOpenCodePlugin, type OpenCodeStatusEvent } from './opencode.js';
-import { MCP_READ_ONLY, codexMcpArgs, openCodeMcp, writeClaudeMcpConfig } from './office-workers.js';
+import { MCP_READ_ONLY, codexMcpArgs, openCodeMcp, writeClaudeMcpConfig, writeCopilotMcpConfig } from './office-workers.js';
 import { ScrollbackStore, searchTerminal, terminalTail } from './history.js';
 import { DSH_PROFILE_DEFAULT, DshSession, dshArgs, terminalSafe, writeDshPatch } from './dsh.js';
 import { DropStore } from './drops.js';
@@ -219,6 +220,10 @@ export class WorkerManager {
   private museConfigHome: string;
   private museDataHome: string;
   private museStateHome: string;
+  /** The plugin that carries Copilot's hooks, loaded with --plugin-dir so no Copilot config is edited. */
+  private copilotPlugin: string;
+  /** Copilot's --additional-mcp-config file for the office's MCP server. */
+  private copilotMcp: string | undefined;
   /** Where the office-queue and office-workers commands are, for the workers' PATH (see writeOfficeCommands). */
   private officeBin: string | undefined;
   /** bin/office-workers.js, which is also the office's MCP server for the agents that take one. */
@@ -278,9 +283,11 @@ export class WorkerManager {
     this.museConfigHome = muse.configHome;
     this.museDataHome = muse.dataHome;
     this.museStateHome = muse.stateHome;
+    this.copilotPlugin = writeCopilotPlugin(dataDir).dir;
     this.mcpScript = binScript('office-workers.js');
     this.officeBin = this.writeOfficeCommands();
     this.claudeMcp = this.mcpScript ? writeClaudeMcpConfig(dataDir, this.mcpScript) : undefined;
+    this.copilotMcp = this.mcpScript ? writeCopilotMcpConfig(dataDir, this.mcpScript) : undefined;
     this.agentPath = resolveCommand(agentCmd);
     const claude = this.defaultProvider === 'claude' ? this.agentPath : resolveCommand('claude');
     this.namer = new TaskNamer(claude, childEnv(), () => officePrompt(this.prompts, 'office.namer'), (id, task, ctx) => {
@@ -438,8 +445,8 @@ export class WorkerManager {
       id,
       kind,
       provider: selectedProvider,
-      model: selectedProvider === 'opencode' || selectedProvider === 'claude' || selectedProvider === 'grok' || selectedProvider === 'muse' || selectedProvider === 'dsh' ? model : undefined,
-      effort: selectedProvider === 'claude' || selectedProvider === 'grok' || selectedProvider === 'muse' || selectedProvider === 'dsh' ? effort : undefined,
+      model: selectedProvider === 'opencode' || selectedProvider === 'claude' || selectedProvider === 'grok' || selectedProvider === 'muse' || selectedProvider === 'copilot' || selectedProvider === 'dsh' ? model : undefined,
+      effort: selectedProvider === 'claude' || selectedProvider === 'grok' || selectedProvider === 'muse' || selectedProvider === 'copilot' || selectedProvider === 'dsh' ? effort : undefined,
       deskId,
       name: kind === 'shell' ? `${name} 🐚` : name,
       color: kind === 'shell' ? '#8d99ae' : agent ? agent.color : COLORS[Math.floor(Math.random() * COLORS.length)],
@@ -1382,6 +1389,67 @@ export class WorkerManager {
     return true;
   }
 
+  /** Copilot lifecycle hooks, from the office's own plugin (see writeCopilotPlugin), so nothing in ~/.copilot is edited. */
+  handleCopilotHook(workerId: string, token: string, event: string, payload: unknown): boolean {
+    const w = this.workers.get(workerId);
+    if (!w || !w.pty || w.info.kind !== 'agent' || w.info.provider !== 'copilot' || !safeEq(token, w.hookToken)) return false;
+    const report = normalizeCopilotHook(event, payload);
+    if (!report) return false;
+    if (w.info.sessionId && w.info.sessionId !== report.sessionId && report.event !== 'sessionStart') return false;
+    if (!w.info.sessionId || w.info.sessionId !== report.sessionId) {
+      if (w.info.sessionId && w.info.sessionId !== report.sessionId) this.clearTask(w);
+      w.info.sessionId = report.sessionId;
+      this.persist();
+    }
+    w.bootBlocked = false;
+    switch (report.event) {
+      case 'sessionStart':
+        w.info.activity = undefined;
+        if (w.info.status === 'starting' || w.info.status === 'needs_input') this.setStatus(w, 'idle');
+        break;
+      case 'userPromptSubmitted':
+        w.info.action = undefined;
+        if (report.prompt) {
+          w.info.activity = truncate(report.prompt, 80);
+          this.notePrompt(w, report.prompt);
+        }
+        this.setStatus(w, 'working');
+        break;
+      case 'preToolUse':
+        w.info.activity = report.tool ? truncate(report.tool, 80) : 'Using a tool';
+        w.info.action = toolAction(report.tool);
+        this.noteTool(w, w.info.activity);
+        if (/(?:^|[._])(?:AskUserQuestion|ask_user_question|ask_user|request_user_input)$/.test(report.tool ?? '')) this.setStatus(w, 'needs_input');
+        else if (w.info.status !== 'working') this.setStatus(w, 'working');
+        else this.emitUpdate(w);
+        break;
+      case 'permissionRequest':
+        w.info.activity = `Wants permission: ${truncate(report.tool ?? 'tool', 80)}`;
+        this.setStatus(w, 'needs_input');
+        break;
+      case 'postToolUse':
+        if (w.info.status === 'needs_input') {
+          w.leftNeedsInputAt = Date.now();
+          this.setStatus(w, 'working');
+        }
+        break;
+      case 'notification':
+        if (report.notificationType === 'permission_prompt') {
+          if (Date.now() - w.leftNeedsInputAt > LATE_PROMPT_GRACE_MS) this.setStatus(w, 'needs_input');
+        } else if (report.notificationType === 'idle_prompt') {
+          if (w.info.status === 'working') this.setStatus(w, 'done');
+        }
+        break;
+      case 'agentStop':
+      case 'sessionEnd':
+        this.setStatus(w, 'done');
+        break;
+    }
+    this.emitUpdate(w);
+    this.persist();
+    return true;
+  }
+
   /** Muse lifecycle hooks, isolated under the office's XDG dirs so they never edit ~/.config/muse. */
   handleMuseHook(workerId: string, token: string, event: string, payload: unknown): boolean {
     const w = this.workers.get(workerId);
@@ -1630,6 +1698,7 @@ export class WorkerManager {
     const isCodex = !isShell && provider === 'codex';
     const isGrok = !isShell && provider === 'grok';
     const isMuse = !isShell && provider === 'muse';
+    const isCopilot = !isShell && provider === 'copilot';
     const isDsh = !isShell && provider === 'dsh';
     const configured = !isShell && provider === this.defaultProvider;
     const station = DESK_BY_ID.get(info.deskId)?.station;
@@ -1681,13 +1750,27 @@ export class WorkerManager {
         if (info.effort) args.push('--reasoning-effort', info.effort);
         if (prompt) args.push('--', prompt);
       }
+    } else if (isCopilot) {
+      args = withoutCopilotLaunchArgs(args);
+      args.push('--plugin-dir', this.copilotPlugin);
+      if (this.copilotMcp) args.push('--additional-mcp-config', `@${this.copilotMcp}`);
+      if (resumeSessionId) {
+        args.push(`--resume=${resumeSessionId}`);
+      } else {
+        if (!info.sessionId) info.sessionId = randomUUID();
+        args.push('--session-id', info.sessionId);
+      }
+      if (info.model) args.push('--model', info.model);
+      if (info.effort) args.push('--reasoning-effort', info.effort);
+      // `=` so a prompt like "- fix login" is never parsed as a CLI option.
+      if (prompt) args.push(`--interactive=${prompt}`);
     }
     if (isCodex) {
       w.codexTools.clear();
       w.codexPending.clear();
       w.codexPermissionUnknown = false;
     }
-    if (isOpenCode || isCodex || isGrok || isMuse) {
+    if (isOpenCode || isCodex || isGrok || isMuse || isCopilot) {
       w.hookToken = randomBytes(16).toString('hex');
       w.openCodeError = false;
     }
@@ -1764,7 +1847,7 @@ export class WorkerManager {
       this.startFailed(w, (err as Error).message);
       return;
     }
-    if (!isClaude && !isCodex && !isGrok && !isMuse) {
+    if (!isClaude && !isCodex && !isGrok && !isMuse && !isCopilot) {
       clockWork(info, 'idle');
       info.status = 'idle';
     }
@@ -1915,7 +1998,7 @@ export class WorkerManager {
 
   private setTitle(w: Worker, title: string) {
     const clean = title.replace(/^[^\p{L}\p{N}]+/u, '').trim();
-    if (clean && clean !== w.info.title && !/^(claude( code)?|grok( build)?|muse( code)?)$/i.test(clean)) {
+    if (clean && clean !== w.info.title && !/^(claude( code)?|grok( build)?|muse( code)?|(github )?copilot( cli)?)$/i.test(clean)) {
       w.info.title = clean;
       this.emitUpdate(w);
     }
@@ -1928,6 +2011,7 @@ export class WorkerManager {
     const isCodex = info.kind === 'agent' && info.provider === 'codex';
     const isGrok = info.kind === 'agent' && info.provider === 'grok';
     const isMuse = info.kind === 'agent' && info.provider === 'muse';
+    const isCopilot = info.kind === 'agent' && info.provider === 'copilot';
     w.pty = proc;
     proc.onData((data) => {
       term.write(data);
@@ -1974,7 +2058,7 @@ export class WorkerManager {
     // blocked on a human: folder trust dialog, login, first-run onboarding. Flag it so it jumps.
     setTimeout(() => {
       if (info.status !== 'starting' || w.pty !== proc) return;
-      if (isClaude || isCodex || isGrok || isMuse) {
+      if (isClaude || isCodex || isGrok || isMuse || isCopilot) {
         w.bootBlocked = true;
         info.activity = isCodex
           ? 'Open the terminal: complete login and review Office hooks in /hooks'
@@ -1982,7 +2066,9 @@ export class WorkerManager {
             ? 'Open the terminal: complete login if Grok asks'
             : isMuse
               ? 'Open the terminal: complete login if Muse asks'
-              : 'Waiting on a setup prompt (trust / login) — open the terminal';
+              : isCopilot
+                ? 'Open the terminal: trust the folder or log in if Copilot asks'
+                : 'Waiting on a setup prompt (trust / login) — open the terminal';
         this.setStatus(w, 'needs_input');
       } else this.setStatus(w, 'idle');
     }, 12000);
@@ -2296,7 +2382,7 @@ process.stdin.on('end', () => {
         const tracker = restoreTracker(s.tracker);
         const provider = s.kind === 'shell'
           ? undefined
-          : s.provider === 'claude' || s.provider === 'opencode' || s.provider === 'codex' || s.provider === 'grok' || s.provider === 'muse' || s.provider === 'dsh' || s.provider === 'custom'
+          : s.provider === 'claude' || s.provider === 'opencode' || s.provider === 'codex' || s.provider === 'grok' || s.provider === 'muse' || s.provider === 'copilot' || s.provider === 'dsh' || s.provider === 'custom'
             ? s.provider
             : tracker.transcript
               ? 'claude'
@@ -2305,8 +2391,8 @@ process.stdin.on('end', () => {
           id: s.id,
           kind: s.kind === 'shell' ? 'shell' : 'agent',
           provider,
-          model: provider === 'opencode' && isValidOpenCodeModel(s.model) ? s.model : provider === 'claude' && isClaudeModel(s.model) ? s.model : provider === 'grok' && isValidGrokModel(s.model) ? s.model : provider === 'muse' && isValidMuseModel(s.model) ? s.model : provider === 'dsh' && isValidDshModel(s.model) ? s.model : undefined,
-          effort: (provider === 'claude' || provider === 'grok' || provider === 'muse' || provider === 'dsh') && isAgentEffort(s.effort) ? s.effort : undefined,
+          model: provider === 'opencode' && isValidOpenCodeModel(s.model) ? s.model : provider === 'claude' && isClaudeModel(s.model) ? s.model : provider === 'grok' && isValidGrokModel(s.model) ? s.model : provider === 'muse' && isValidMuseModel(s.model) ? s.model : provider === 'copilot' && isValidCopilotModel(s.model) ? s.model : provider === 'dsh' && isValidDshModel(s.model) ? s.model : undefined,
+          effort: (provider === 'claude' || provider === 'grok' || provider === 'muse' || provider === 'copilot' || provider === 'dsh') && isAgentEffort(s.effort) ? s.effort : undefined,
           deskId: s.deskId,
           name: s.name ?? 'Worker',
           color: s.color ?? COLORS[0],

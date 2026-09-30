@@ -4,6 +4,7 @@ import { isAgentEffort, isClaudeModel, type AgentProvider } from '../shared/prot
 export const OPEN_CODE_MODEL_MAX = 256;
 export const GROK_MODEL_MAX = 64;
 export const MUSE_MODEL_MAX = 128;
+export const COPILOT_MODEL_MAX = 128;
 
 /**
  * DeepSeek Harness model ids are opaque option ids from its live catalog (the `session/new`
@@ -25,13 +26,14 @@ export function configuredProvider(command: string): AgentProvider {
   if (base === 'codex') return 'codex';
   if (base === 'grok') return 'grok';
   if (base === 'muse') return 'muse';
+  if (base === 'copilot') return 'copilot';
   if (base === 'dsh') return 'dsh';
   return 'custom';
 }
 
 /** The providers an office started with `configured` can hire: the ones it knows, and a custom --agent only when that's what it was started with. */
 export function agentProviders(configured: AgentProvider): AgentProvider[] {
-  return configured === 'custom' ? ['claude', 'opencode', 'codex', 'grok', 'muse', 'dsh', 'custom'] : ['claude', 'opencode', 'codex', 'grok', 'muse', 'dsh'];
+  return configured === 'custom' ? ['claude', 'opencode', 'codex', 'grok', 'muse', 'copilot', 'dsh', 'custom'] : ['claude', 'opencode', 'codex', 'grok', 'muse', 'copilot', 'dsh'];
 }
 
 /** OpenCode model ids are argv values, so reject anything that could be ambiguous or unsafe. */
@@ -56,6 +58,13 @@ export function isValidMuseModel(value: unknown): value is string {
   return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
 }
 
+/** Copilot model ids are argv values (`claude-sonnet-4.5`, `gpt-5`, `auto`), so reject anything ambiguous or unsafe. */
+export function isValidCopilotModel(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > COPILOT_MODEL_MAX) return false;
+  if (/[\s\p{Cc}\p{Cf}]/u.test(value)) return false;
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
+}
+
 /** DSH catalog ids are opaque, so only their length and control characters can be checked here. */
 export function isValidDshModel(value: unknown): value is string {
   if (typeof value !== 'string' || value.length === 0 || value.length > DSH_MODEL_MAX) return false;
@@ -68,16 +77,17 @@ export function validateWorkerModel(kind: 'agent' | 'shell', provider: AgentProv
   if (provider === 'claude') return isClaudeModel(model) ? undefined : 'Invalid Claude model (expected fable, opus, sonnet or haiku)';
   if (provider === 'grok') return isValidGrokModel(model) ? undefined : 'Invalid Grok model';
   if (provider === 'muse') return isValidMuseModel(model) ? undefined : 'Invalid Muse model';
+  if (provider === 'copilot') return isValidCopilotModel(model) ? undefined : 'Invalid Copilot model';
   if (provider === 'dsh') return isValidDshModel(model) ? undefined : 'Invalid DeepSeek Harness model (expected a catalog model id of up to 256 characters)';
-  if (provider !== 'opencode') return 'Models can only be selected for Claude Code, OpenCode, Grok, Muse or DeepSeek Harness workers';
+  if (provider !== 'opencode') return 'Models can only be selected for Claude Code, OpenCode, Grok, Muse, Copilot or DeepSeek Harness workers';
   if (!isValidOpenCodeModel(model)) return 'Invalid OpenCode model (expected provider/model without whitespace)';
   return undefined;
 }
 
-/** Claude Code, Grok and Muse reasoning-effort flags; DSH advertises a reasoning_effort configuration option. */
+/** Claude Code, Grok, Muse and Copilot reasoning-effort flags; DSH advertises a reasoning_effort configuration option. */
 export function validateWorkerEffort(kind: 'agent' | 'shell', provider: AgentProvider | undefined, effort: unknown): string | undefined {
   if (effort === undefined) return undefined;
   if (kind === 'shell') return 'Shell workers do not have a reasoning effort';
-  if (provider !== 'claude' && provider !== 'grok' && provider !== 'muse' && provider !== 'dsh') return 'Reasoning effort can only be selected for Claude Code, Grok, Muse or DeepSeek Harness workers';
+  if (provider !== 'claude' && provider !== 'grok' && provider !== 'muse' && provider !== 'copilot' && provider !== 'dsh') return 'Reasoning effort can only be selected for Claude Code, Grok, Muse, Copilot or DeepSeek Harness workers';
   return isAgentEffort(effort) ? undefined : 'Invalid effort (expected low, medium, high, xhigh or max)';
 }

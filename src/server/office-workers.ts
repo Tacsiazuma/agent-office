@@ -187,6 +187,18 @@ export function writeClaudeMcpConfig(dataDir: string, script: string): string {
   return file;
 }
 
+/**
+ * Writes the file Copilot CLI's --additional-mcp-config reads (@file) for the MCP server, and returns
+ * its path. That flag adds to the user's own ~/.copilot/mcp-config.json for this launch only, and
+ * Copilot hands its MCP servers the worker's environment, which is where each one's identity is.
+ */
+export function writeCopilotMcpConfig(dataDir: string, script: string): string {
+  const file = path.join(dataDir, 'agent-office-copilot-mcp.json');
+  const config = { mcpServers: { [MCP_NAME]: { type: 'local', command: process.execPath, args: [script, 'mcp'], tools: ['*'] } } };
+  writeFileSync(file, JSON.stringify(config, null, 2), { mode: 0o600 });
+  return file;
+}
+
 /** Codex's -c overrides for the MCP server, with the office's variables passed on to it. */
 export function codexMcpArgs(script: string): string[] {
   // TOML basic strings and arrays read JSON's.
