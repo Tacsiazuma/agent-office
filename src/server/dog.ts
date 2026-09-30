@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DESK_BY_ID, FLOOR, KIOSK, type DeskDef } from '../shared/layout.js';
-import { cleanDogName, dogAt, dogDefaults, legSeconds, type DogAct, type DogBreed, type DogState } from '../shared/dog.js';
+import { cleanDogName, dogAt, dogDefaults, DOG_BREEDS, legSeconds, type DogAct, type DogBreed, type DogState } from '../shared/dog.js';
 import { deskPoint, nearestWalkable, route, walkable, type Pt } from '../shared/nav.js';
 import type { PeerInfo, WorkerInfo } from '../shared/protocol.js';
 
@@ -50,12 +50,14 @@ type Leg = Omit<DogState, 'name' | 'coat' | 'breed' | 'elapsed'> & { start: numb
  * A floor's dog. It naps under the desks of workers who are busy, trots after people for a while,
  * sniffs around and hangs out on the lounge rug. When a worker needs input it drops everything, runs
  * to that desk and barks (the browsers do the barking; see client/world/dog.ts). Its name is kept
- * in the floor's .agent-office/dog.json; its coat and breed come from the floor's id (see dogDefaults).
+ * in the floor's .agent-office/dog.json; its coat comes from the floor's id (see dogDefaults), and so does its breed unless dog.json names one.
  */
 export class Dog {
   private name: string;
   private readonly coat: number;
   private readonly breed: DogBreed;
+  /** dog.json named the breed, so a rename keeps writing it. */
+  private readonly customBreed: boolean;
   private readonly fallbackName: string;
   private readonly file: string;
   private leg: Leg;
@@ -79,9 +81,11 @@ export class Dog {
     const d = dogDefaults(floorId);
     this.fallbackName = d.name;
     this.coat = d.coat;
-    this.breed = d.breed;
     this.file = path.join(dataDir, 'dog.json');
-    this.name = this.load() ?? d.name;
+    const saved = this.load();
+    this.name = saved.name ?? d.name;
+    this.breed = saved.breed ?? d.breed;
+    this.customBreed = saved.breed !== undefined;
     // Lying on the rug when the office opens, and up and about a few seconds later.
     const spot = pick(LOUNGE);
     this.leg = { path: [spot], speed: 0, act: 'lie', face: Math.PI / 2 + rand(-0.6, 0.6), start: Date.now() - 60_000 };
@@ -150,7 +154,7 @@ export class Dog {
   rename(raw: string): string {
     this.name = cleanDogName(raw) || this.fallbackName;
     try {
-      writeFileSync(this.file, JSON.stringify({ name: this.name }, null, 2), { mode: 0o600 });
+      writeFileSync(this.file, JSON.stringify({ name: this.name, ...(this.customBreed ? { breed: this.breed } : {}) }, null, 2), { mode: 0o600 });
     } catch (err) {
       console.error(`agent-office: couldn't save the dog's name: ${(err as Error).message}`);
     }
@@ -163,13 +167,15 @@ export class Dog {
     clearTimeout(this.timer);
   }
 
-  private load(): string | undefined {
-    if (!existsSync(this.file)) return undefined;
+  private load(): { name?: string; breed?: DogBreed } {
+    if (!existsSync(this.file)) return {};
     try {
-      const saved = JSON.parse(readFileSync(this.file, 'utf8')) as { name?: unknown };
-      return typeof saved.name === 'string' ? cleanDogName(saved.name) || undefined : undefined;
+      const saved = JSON.parse(readFileSync(this.file, 'utf8')) as { name?: unknown; breed?: unknown };
+      const name = typeof saved.name === 'string' ? cleanDogName(saved.name) || undefined : undefined;
+      const breed = DOG_BREEDS.find((b) => b === saved.breed);
+      return { name, breed };
     } catch {
-      return undefined;
+      return {};
     }
   }
 
